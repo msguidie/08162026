@@ -1,0 +1,13 @@
+// Server URL - update after deploying to Render
+export const SERVER_URL = 'https://backupsplendor.onrender.com';
+
+export const CONNECTION_CONFIG = {
+  HEARTBEAT_INTERVAL: 10000,
+  MAX_RECONNECT_ATTEMPTS: 15,
+  RECONNECT_DELAY_BASE: 1000,
+  RECONNECT_DELAY_MAX: 15000,
+  CONNECTION_TIMEOUT: 45000,
+  HEALTH_CHECK_RETRY: 3000,
+  MAX_HEALTH_CHECKS: 20,
+  RECONNECT_CALLBACK_TIMEOUT: 8000,
+};
