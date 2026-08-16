@@ -178,17 +178,6 @@ export default function GameBoard() {
   // Get selected gems for display
   const selectedGems = gameState.turnAction?.type === 'TAKE_GEMS' ? gameState.turnAction.selected : [];
   const isTeamGame = gameState.gameMode !== 'INDIVIDUAL';
-  const isOneVsTwo = gameState.gameMode === 'ONE_V_TWO';
-  const teamSummaries = isTeamGame ? ([0, 1] as TeamId[]).map(teamId => {
-    const members = gameState.players.filter(player => player.teamId === teamId);
-    const scores = members.map(player => player.score).sort((a, b) => b - a);
-    return {
-      teamId,
-      members,
-      total: scores.reduce((sum, score) => sum + score, 0),
-      secondScore: scores[1] ?? 0,
-    };
-  }) : [];
   const effectiveServerNow = clockNow + serverClockOffset;
   const activeClockPlayerIndex = gameState.phase === 'PLAYING' ? gameState.currentPlayerIndex : -1;
   const playerClocks = gameState.players.map((_, index) =>
@@ -228,27 +217,6 @@ export default function GameBoard() {
           )}
         </div>
       </div>
-
-      {isTeamGame && (
-        <div className="absolute top-1 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 text-[9px] font-display">
-          {teamSummaries.map(team => (
-            <div key={team.teamId} className={`px-2 py-0.5 rounded-lg border backdrop-blur-sm ${
-              team.teamId === 0
-                ? 'bg-[#5B8C6A]/10 border-[#5B8C6A]/20 text-[#4C795A]'
-                : 'bg-[#7B6FA0]/10 border-[#7B6FA0]/20 text-[#6B5F91]'
-            }`}>
-              {isOneVsTwo ? (
-                <>{team.teamId === 0 ? 'Solo' : 'Duo'} {team.total}/{team.teamId === 0 ? 15 : 32}</>
-              ) : (
-                <>
-                  Team {team.teamId === 0 ? 'A' : 'B'} {team.total}
-                  <span className="opacity-60 ml-1">2nd {team.secondScore}</span>
-                </>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Click-away to close menu */}
       {showMenu && <div className="fixed inset-0 z-20" onClick={() => setShowMenu(false)} />}
