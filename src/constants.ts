@@ -1,5 +1,5 @@
 // Server URL - update after deploying to Render
-export const SERVER_URL = 'https://backupsplendor.onrender.com';
+export const SERVER_URL = 'https://zero8162026.onrender.com';
 
 export const CONNECTION_CONFIG = {
   HEARTBEAT_INTERVAL: 10000,
