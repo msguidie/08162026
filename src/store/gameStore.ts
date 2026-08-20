@@ -26,6 +26,7 @@ interface GameStore {
   lobbyTeamFormat: LobbyTeamFormat;
   lobbyTeamLayout: TeamLayout;
   lobbyTeamSeats: TeamSeats;
+  lobbyUnlimitedTime: boolean;
   gameState: GameState | null;
   actionMode: ActionMode;
   pendingTileChoice: number[] | null; // tile IDs to choose from
@@ -42,6 +43,7 @@ interface GameStore {
   toggleReady: () => void;
   toggleTeamMode: () => void;
   toggleTeamLayout: () => void;
+  toggleUnlimitedTime: () => void;
   selectTeamSeat: (teamId: TeamId, seatIndex: 0 | 1) => void;
   setActionMode: (mode: ActionMode) => void;
   sendAction: (action: Record<string, unknown>) => void;
@@ -73,6 +75,7 @@ const useGameStore = create<GameStore>((set, get) => {
       lobbyTeamFormat: lobbyState.teamFormat,
       lobbyTeamLayout: lobbyState.teamLayout,
       lobbyTeamSeats: lobbyState.teamSeats,
+      lobbyUnlimitedTime: lobbyState.unlimitedTime,
     });
   }
 
@@ -136,14 +139,10 @@ const useGameStore = create<GameStore>((set, get) => {
 
     socket.on('action_result', (result: ActionResult) => {
       set({ lastActionResult: result });
-      if (result.payload?.forced) {
-        const username = get().gameState?.players[result.actingPlayer]?.username || 'A player';
-        showToast(`${username} timed out; the system completed the turn.`, 'warn');
-      }
       // If the action was completed (turn changed), reset action mode
       if (result.type === 'BUY_CARD' || result.type === 'RESERVE_CARD' ||
           result.type === 'RESERVE_FROM_DECK' || result.type === 'RESIGN' ||
-          result.type === 'CHOOSE_TILE' || result.type === 'AUTO_PASS') {
+          result.type === 'CHOOSE_TILE' || result.type === 'TIMEOUT') {
         set({ actionMode: null, pendingTileChoice: null });
       }
       // If gems were fully taken, reset mode
@@ -255,6 +254,7 @@ const useGameStore = create<GameStore>((set, get) => {
     lobbyTeamFormat: null,
     lobbyTeamLayout: 'ADJACENT',
     lobbyTeamSeats: EMPTY_TEAM_SEATS,
+    lobbyUnlimitedTime: false,
 
     connectToServer: async () => {
       const existingSocket = get().socket;
@@ -314,6 +314,7 @@ const useGameStore = create<GameStore>((set, get) => {
       get().socket?.emit('leave_lobby');
       set({
         appPhase: 'LOGIN', lobbyPlayers: [], lobbyTeamMode: false, lobbyTeamFormat: null,
+        lobbyUnlimitedTime: false,
         lobbyTeamLayout: 'ADJACENT', lobbyTeamSeats: EMPTY_TEAM_SEATS,
       });
     },
@@ -335,6 +336,14 @@ const useGameStore = create<GameStore>((set, get) => {
       if (!socket) return;
       const layout: TeamLayout = lobbyTeamLayout === 'ADJACENT' ? 'OPPOSITE' : 'ADJACENT';
       socket.emit('set_team_layout', { layout }, (res: { error?: string }) => {
+        if (res?.error) showToast(res.error, 'warn');
+      });
+    },
+
+    toggleUnlimitedTime: () => {
+      const { socket, lobbyUnlimitedTime } = get();
+      if (!socket) return;
+      socket.emit('set_unlimited_time', { enabled: !lobbyUnlimitedTime }, (res: { error?: string }) => {
         if (res?.error) showToast(res.error, 'warn');
       });
     },

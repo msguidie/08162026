@@ -10,8 +10,9 @@ const {
   calculateRatingChanges,
   updateTimeControl,
   consumeTurnTime,
+  addTimeIncrement,
   startTurnTimeControl,
-  processAutoAction,
+  pauseTurnTimeControl,
 } = require('./gameLogic');
 
 const app = express();
@@ -53,11 +54,13 @@ function createDefaultLobbySettings() {
     teamFormat: null,
     teamLayout: 'ADJACENT',
     teamSeats: [[null, null], [null, null]],
+    unlimitedTime: false,
   };
 }
 
-function resetLobbySettings(resetReady = false) {
-  lobbySettings = createDefaultLobbySettings();
+function resetLobbySettings(resetReady = false, preserveUnlimitedTime = false) {
+  const unlimitedTime = preserveUnlimitedTime ? lobbySettings.unlimitedTime : false;
+  lobbySettings = { ...createDefaultLobbySettings(), unlimitedTime };
   if (resetReady) lobbyQueue.forEach(player => { player.ready = false; });
 }
 
@@ -73,6 +76,7 @@ function lobbyState() {
     teamFormat: lobbySettings.teamFormat,
     teamLayout: lobbySettings.teamLayout,
     teamSeats: lobbySettings.teamSeats.map(team => [...team]),
+    unlimitedTime: lobbySettings.unlimitedTime,
   };
 }
 
@@ -178,7 +182,7 @@ function removeFromLobby(socketId) {
       lobbySettings.teamSeats = lobbySettings.teamSeats.map(team =>
         team.map(username => username === leavingPlayer.username ? null : username));
     }
-    if (lobbySettings.teamMode && lobbyQueue.length !== requiredTeamPlayerCount()) resetLobbySettings(true);
+    if (lobbySettings.teamMode && lobbyQueue.length !== requiredTeamPlayerCount()) resetLobbySettings(true, true);
     broadcastLobby();
   }
 }
@@ -203,8 +207,9 @@ function startGame() {
     ? {
       gameMode: lobbySettings.teamFormat === 'ONE_V_TWO' ? 'ONE_V_TWO' : 'TEAM',
       teamLayout: lobbySettings.teamFormat === 'TWO_V_TWO' ? lobbySettings.teamLayout : null,
+      unlimitedTime: lobbySettings.unlimitedTime,
     }
-    : { gameMode: 'INDIVIDUAL' };
+    : { gameMode: 'INDIVIDUAL', unlimitedTime: lobbySettings.unlimitedTime };
 
   if (lobbySettings.teamMode) {
     const seatOrder = lobbySettings.teamFormat === 'ONE_V_TWO'
@@ -274,6 +279,7 @@ function findActiveGame(username) {
 // Send game state to all players in a room
 function broadcastGameState(room) {
   for (const ps of room.playerSockets) {
+    if (!ps.socketId) continue;
     io.to(ps.socketId).emit('game_state_update', clientViewForPlayer(room.gameState, ps.playerIndex));
   }
 }
@@ -296,9 +302,9 @@ function applyRoomRatings(room, excludeResigned = false) {
 
 function broadcastProcessedAction(room, actionResult, excludeResignedFromRatings = false) {
   const result = actionResult || {
-    type: 'AUTO_PASS',
+    type: 'TIMEOUT',
     actingPlayer: room.gameState.currentPlayerIndex,
-    payload: { forced: true },
+    payload: {},
   };
 
   const tileClaimed = room.gameState._tileClaimed;
@@ -312,6 +318,7 @@ function broadcastProcessedAction(room, actionResult, excludeResignedFromRatings
   }
 
   for (const playerSocket of room.playerSockets) {
+    if (!playerSocket.socketId) continue;
     io.to(playerSocket.socketId).emit(
       'game_state_update',
       clientViewForPlayer(room.gameState, playerSocket.playerIndex),
@@ -326,21 +333,27 @@ function broadcastProcessedAction(room, actionResult, excludeResignedFromRatings
   }
 }
 
-function forceTimedOutTurn(room, now = Date.now()) {
-  const timedOutPlayer = room.gameState.currentPlayerIndex;
-  const previousTurnNumber = room.gameState.turnNumber;
-  const autoResult = processAutoAction(room.gameState, timedOutPlayer);
-  if (autoResult.error) {
-    // Avoid a tight retry loop if a corrupted state ever prevents automation.
-    room.gameState.timeControl.countdownDeadline = now + 1000;
-    return false;
-  }
+function isPlayerConnected(room, playerIndex) {
+  return !!room.playerSockets[playerIndex]?.socketId;
+}
 
-  if (room.gameState.phase === 'PLAYING' && room.gameState.turnNumber !== previousTurnNumber) {
-    startTurnTimeControl(room.gameState, now);
-  }
+function startRoomTurnClock(room, now = Date.now()) {
+  startTurnTimeControl(room.gameState, now, !isPlayerConnected(room, room.gameState.currentPlayerIndex));
+}
+
+function eliminateTimedOutPlayer(room, now = Date.now()) {
+  const timedOutPlayer = room.gameState.currentPlayerIndex;
+  processResign(room.gameState, timedOutPlayer);
+
+  const activeCount = room.gameState.numPlayers - (room.gameState.resignedPlayers?.length || 0);
+  if (activeCount < 2) room.gameState.phase = 'GAME_OVER';
+  if (room.gameState.phase === 'PLAYING') startRoomTurnClock(room, now);
   room.lastPlayerAction = now;
-  broadcastProcessedAction(room, autoResult.result);
+  broadcastProcessedAction(room, {
+    type: 'TIMEOUT',
+    actingPlayer: timedOutPlayer,
+    payload: { timedOutPlayerIndex: timedOutPlayer },
+  }, room.gameState.gameMode === 'INDIVIDUAL');
   return true;
 }
 
@@ -350,11 +363,7 @@ setInterval(() => {
   for (const [, room] of gameRooms) {
     if (!room.gameState.timeControl || room.gameState.phase !== 'PLAYING') continue;
     const timerStatus = updateTimeControl(room.gameState, now);
-    if (timerStatus.expired) {
-      forceTimedOutTurn(room, now);
-    } else if (timerStatus.countdownStarted) {
-      broadcastGameState(room);
-    }
+    if (timerStatus.expired) eliminateTimedOutPlayer(room, now);
   }
 }, TIMER_POLL_INTERVAL);
 
@@ -380,11 +389,21 @@ io.on('connection', (socket) => {
     const activeGame = findActiveGame(username);
     if (activeGame) {
       const { roomId, room, playerSocket } = activeGame;
+      const now = Date.now();
+      const wasDisconnected = !playerSocket.socketId;
       // Update socket id
       playerSocket.socketId = socket.id;
       socket.join(roomId);
       socketToAccount.set(socket.id, username);
       accountToSocket.set(username, socket.id);
+
+      const isStillPlaying = !room.gameState.resignedPlayers.includes(playerSocket.playerIndex);
+      if (wasDisconnected && isStillPlaying && room.gameState.timeControl) {
+        addTimeIncrement(room.gameState, playerSocket.playerIndex, now);
+        if (room.gameState.currentPlayerIndex === playerSocket.playerIndex) {
+          startRoomTurnClock(room, now);
+        }
+      }
 
       socket.emit('game_start', {
         roomId,
@@ -396,7 +415,8 @@ io.on('connection', (socket) => {
         socket.emit('tile_choice_required', { tileIds: room.gameState._pendingTileChoice });
       }
       socket.to(roomId).emit('player_reconnected', { username });
-      room.lastPlayerAction = Date.now();
+      broadcastGameState(room);
+      room.lastPlayerAction = now;
       cb?.({ action: 'rejoin_game' });
       return;
     }
@@ -439,12 +459,29 @@ io.on('connection', (socket) => {
       cb?.({ error: 'Team mode requires exactly three or four players' });
       return;
     }
+    const unlimitedTime = lobbySettings.unlimitedTime;
     lobbySettings = enabled ? {
       teamMode: true,
       teamFormat: lobbyQueue.length === 3 ? 'ONE_V_TWO' : 'TWO_V_TWO',
       teamLayout: 'ADJACENT',
       teamSeats: [[null, null], [null, null]],
-    } : createDefaultLobbySettings();
+      unlimitedTime,
+    } : { ...createDefaultLobbySettings(), unlimitedTime };
+    lobbyQueue.forEach(p => { p.ready = false; });
+    broadcastLobby();
+    cb?.({ ok: true });
+  });
+
+  socket.on('set_unlimited_time', (data = {}, cb) => {
+    const { enabled } = data;
+    const player = lobbyQueue.find(p => p.socketId === socket.id);
+    if (!player) { cb?.({ error: 'Not in lobby' }); return; }
+    if (typeof enabled !== 'boolean') { cb?.({ error: 'Invalid time setting' }); return; }
+    if (lobbyQueue.length !== 3 && lobbyQueue.length !== 4) {
+      cb?.({ error: 'The time setting is available in three- and four-player lobbies' });
+      return;
+    }
+    lobbySettings.unlimitedTime = enabled;
     lobbyQueue.forEach(p => { p.ready = false; });
     broadcastLobby();
     cb?.({ ok: true });
@@ -501,8 +538,8 @@ io.on('connection', (socket) => {
     const now = Date.now();
     const timerStatus = updateTimeControl(room.gameState, now);
     if (timerStatus.expired) {
-      forceTimedOutTurn(room, now);
-      ack?.({ error: 'Your countdown expired; the system completed the turn.' });
+      eliminateTimedOutPlayer(room, now);
+      ack?.({ error: 'The active player ran out of time.' });
       return;
     }
 
@@ -516,8 +553,10 @@ io.on('connection', (socket) => {
     }
 
     consumeTurnTime(room.gameState, actingPlayerIndex, now);
+    const turnCompleted = room.gameState.turnNumber !== previousTurnNumber || room.gameState.phase === 'GAME_OVER';
+    if (turnCompleted) addTimeIncrement(room.gameState, actingPlayerIndex, now);
     if (room.gameState.phase === 'PLAYING' && room.gameState.turnNumber !== previousTurnNumber) {
-      startTurnTimeControl(room.gameState, now);
+      startRoomTurnClock(room, now);
     }
     room.lastPlayerAction = now;
     broadcastProcessedAction(room, result.result);
@@ -555,7 +594,7 @@ io.on('connection', (socket) => {
     const activeCount = room.gameState.numPlayers - (room.gameState.resignedPlayers?.length || 0);
     if (activeCount < 2) room.gameState.phase = 'GAME_OVER';
     if (room.gameState.phase === 'PLAYING' && room.gameState.currentPlayerIndex !== previousCurrentPlayer) {
-      startTurnTimeControl(room.gameState, now);
+      startRoomTurnClock(room, now);
     }
     room.lastPlayerAction = now;
     broadcastProcessedAction(room, {
@@ -595,8 +634,17 @@ io.on('connection', (socket) => {
       for (const [roomId, room] of gameRooms) {
         const ps = room.playerSockets.find(p => p.username === username && p.socketId === socket.id);
         if (ps) {
+          const now = Date.now();
+          const timerStatus = updateTimeControl(room.gameState, now);
+          if (timerStatus.expired) {
+            eliminateTimedOutPlayer(room, now);
+          } else {
+            pauseTurnTimeControl(room.gameState, ps.playerIndex, now);
+          }
           ps.socketId = null;
+          pauseTurnTimeControl(room.gameState, ps.playerIndex, now);
           socket.to(roomId).emit('player_disconnected', { username });
+          broadcastGameState(room);
         }
       }
     }

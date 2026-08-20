@@ -52,10 +52,9 @@ export interface GameResult {
 
 export interface TimeControlState {
   mainTimeMs: number;
-  countdownMs: number;
+  incrementMs: number;
   playerTimeRemainingMs: number[];
-  activeSince: number;
-  countdownDeadline: number | null;
+  activeSince: number | null;
   serverNow: number;
 }
 
@@ -132,6 +131,7 @@ export interface LobbyState {
   teamFormat: LobbyTeamFormat;
   teamLayout: TeamLayout;
   teamSeats: TeamSeats;
+  unlimitedTime: boolean;
 }
 
 // Server -> client: what just happened (for animations)

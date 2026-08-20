@@ -236,12 +236,11 @@ function createInitialGameState(players, options = {}) {
     teamLayout,
     teams,
     gameResult: null,
-    timeControl: n === 3 || n === 4 ? {
+    timeControl: !options.unlimitedTime && (n === 3 || n === 4) ? {
       mainTimeMs: 3 * 60 * 1000,
-      countdownMs: 8 * 1000,
+      incrementMs: 10 * 1000,
       playerTimeRemainingMs: new Array(n).fill(3 * 60 * 1000),
       activeSince: now,
-      countdownDeadline: null,
       serverNow: now,
     } : null,
   };
@@ -284,36 +283,25 @@ function getNextActivePlayer(state, currentIdx) {
 
 function updateTimeControl(state, now = Date.now()) {
   const clock = state.timeControl;
-  if (!clock || state.phase !== 'PLAYING') return { enabled: false, countdownStarted: false, expired: false };
+  if (!clock || state.phase !== 'PLAYING') return { enabled: false, paused: false, expired: false };
 
   clock.serverNow = now;
-  if (clock.countdownDeadline !== null) {
-    return {
-      enabled: true,
-      countdownStarted: false,
-      expired: now >= clock.countdownDeadline,
-    };
-  }
+  if (clock.activeSince === null) return { enabled: true, paused: true, expired: false };
 
   const playerIndex = state.currentPlayerIndex;
   const remaining = Math.max(0, clock.playerTimeRemainingMs[playerIndex] ?? 0);
-  const mainDeadline = clock.activeSince + remaining;
-  if (now < mainDeadline) return { enabled: true, countdownStarted: false, expired: false };
+  const elapsed = Math.max(0, now - clock.activeSince);
+  if (elapsed < remaining) return { enabled: true, paused: false, expired: false };
 
   clock.playerTimeRemainingMs[playerIndex] = 0;
-  clock.activeSince = mainDeadline;
-  clock.countdownDeadline = mainDeadline + clock.countdownMs;
-  return {
-    enabled: true,
-    countdownStarted: true,
-    expired: now >= clock.countdownDeadline,
-  };
+  clock.activeSince = null;
+  return { enabled: true, paused: false, expired: true };
 }
 
 function consumeTurnTime(state, playerIndex, now = Date.now()) {
   const clock = state.timeControl;
   if (!clock) return;
-  if (clock.countdownDeadline === null) {
+  if (clock.activeSince !== null) {
     const elapsed = Math.max(0, now - clock.activeSince);
     clock.playerTimeRemainingMs[playerIndex] = Math.max(
       0,
@@ -324,82 +312,27 @@ function consumeTurnTime(state, playerIndex, now = Date.now()) {
   clock.serverNow = now;
 }
 
-function startTurnTimeControl(state, now = Date.now()) {
+function addTimeIncrement(state, playerIndex, now = Date.now()) {
   const clock = state.timeControl;
-  if (!clock || state.phase !== 'PLAYING') return;
-  clock.activeSince = now;
-  clock.countdownDeadline = (clock.playerTimeRemainingMs[state.currentPlayerIndex] ?? 0) <= 0
-    ? now + clock.countdownMs
-    : null;
+  if (!clock) return;
+  clock.playerTimeRemainingMs[playerIndex] = Math.max(0, clock.playerTimeRemainingMs[playerIndex] ?? 0)
+    + clock.incrementMs;
   clock.serverNow = now;
 }
 
-function withForcedFlag(response) {
-  if (response?.result) {
-    response.result.payload = { ...response.result.payload, forced: true };
-  }
-  return response;
+function startTurnTimeControl(state, now = Date.now(), paused = false) {
+  const clock = state.timeControl;
+  if (!clock || state.phase !== 'PLAYING') return;
+  clock.activeSince = paused ? null : now;
+  clock.serverNow = now;
 }
 
-function processAutoAction(state, playerIndex) {
-  if (state.phase !== 'PLAYING' || state.currentPlayerIndex !== playerIndex) {
-    return { error: 'Player turn is no longer active' };
-  }
-
-  if (state.turnAction?.type === 'RESERVE') {
-    const faceUpCards = state.board.flat();
-    if (faceUpCards.length > 0) {
-      const card = faceUpCards[Math.floor(Math.random() * faceUpCards.length)];
-      return withForcedFlag(processAction(state, playerIndex, { type: 'RESERVE_CARD', cardId: card.id }));
-    }
-
-    // A fully exhausted board is exceptional. Return the already-granted gold
-    // and finish the turn instead of leaving the game permanently blocked.
-    if (state.turnAction.goldTaken && state.players[playerIndex].gems[5] > 0) {
-      state.players[playerIndex].gems[5]--;
-      state.gems[5]++;
-    }
-    state.turnAction = null;
-    finishTurn(state);
-    return { ok: true, result: { type: 'AUTO_PASS', actingPlayer: playerIndex, payload: { forced: true } } };
-  }
-
-  if (state.turnAction?.type === 'BUY' && state._pendingTileChoice?.length > 0) {
-    const choices = state._pendingTileChoice;
-    const tileId = choices[Math.floor(Math.random() * choices.length)];
-    return withForcedFlag(processAction(state, playerIndex, { type: 'CHOOSE_TILE', tileId }));
-  }
-
-  const startingTurnNumber = state.turnNumber;
-  let lastResponse = null;
-  for (let color = 0; color < 5; color++) {
-    const selected = state.turnAction?.type === 'TAKE_GEMS' ? state.turnAction.selected : [];
-    if (selected.includes(color)) continue;
-    const response = processAction(state, playerIndex, { type: 'SELECT_GEM', color });
-    if (response.ok) lastResponse = response;
-    if (state.phase !== 'PLAYING' || state.turnNumber !== startingTurnNumber) {
-      return withForcedFlag(lastResponse);
-    }
-  }
-
-  if (state.turnAction?.type === 'TAKE_GEMS' && state.turnAction.selected.length > 0) {
-    const selected = [...state.turnAction.selected];
-    const player = state.players[playerIndex];
-    for (const color of selected) {
-      player.gems[color]++;
-      state.gems[color]--;
-    }
-    state.turnAction = null;
-    advanceTurn(state);
-    return {
-      ok: true,
-      result: { type: 'SELECT_GEM', actingPlayer: playerIndex, payload: { selected, forced: true } },
-    };
-  }
-
-  state.turnAction = null;
-  finishTurn(state);
-  return { ok: true, result: { type: 'AUTO_PASS', actingPlayer: playerIndex, payload: { forced: true } } };
+function pauseTurnTimeControl(state, playerIndex, now = Date.now()) {
+  const clock = state.timeControl;
+  if (!clock || state.phase !== 'PLAYING' || state.currentPlayerIndex !== playerIndex) return;
+  consumeTurnTime(state, playerIndex, now);
+  clock.activeSince = null;
+  clock.serverNow = now;
 }
 
 // ── Process actions ──
@@ -791,7 +724,8 @@ module.exports = {
   finishTurn,
   updateTimeControl,
   consumeTurnTime,
+  addTimeIncrement,
   startTurnTimeControl,
-  processAutoAction,
+  pauseTurnTimeControl,
   totalGems,
 };

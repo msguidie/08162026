@@ -5,8 +5,8 @@ import type { LobbyPlayer, TeamId } from '../types';
 
 export default function WaitingRoom() {
   const {
-    lobbyPlayers, lobbyTeamMode, lobbyTeamFormat, lobbyTeamLayout, lobbyTeamSeats,
-    myAccount, toggleReady, toggleTeamMode, toggleTeamLayout,
+    lobbyPlayers, lobbyTeamMode, lobbyTeamFormat, lobbyTeamLayout, lobbyTeamSeats, lobbyUnlimitedTime,
+    myAccount, toggleReady, toggleTeamMode, toggleTeamLayout, toggleUnlimitedTime,
     selectTeamSeat, leaveLobby,
   } = useGameStore();
 
@@ -24,6 +24,7 @@ export default function WaitingRoom() {
   const waitingCount = lobbyPlayers.filter(p => !p.ready).length;
   const emptySeatCount = requiredSeatCount - seatedNames.length;
   const canShowTeamToggle = lobbyPlayers.length === 3 || lobbyPlayers.length === 4 || lobbyTeamMode;
+  const canShowTimeToggle = lobbyPlayers.length === 3 || lobbyPlayers.length === 4 || lobbyTeamMode;
   const isOneVsTwo = lobbyTeamFormat === 'ONE_V_TWO';
 
   return (
@@ -47,6 +48,20 @@ export default function WaitingRoom() {
               checked={lobbyTeamMode}
               onClick={toggleTeamMode}
               label={lobbyPlayers.length === 3 || isOneVsTwo ? 'Toggle 1v2 mode' : 'Toggle team mode'}
+            />
+          </div>
+        )}
+
+        {canShowTimeToggle && (
+          <div className="flex items-center justify-between rounded-xl bg-white/45 border border-white/60 px-4 py-3">
+            <div>
+              <div className="text-sm font-display font-semibold text-slate-700">Unlimited Time</div>
+              <div className="text-[10px] text-slate-400">Otherwise each player uses a 3 min + 10 sec clock</div>
+            </div>
+            <Switch
+              checked={lobbyUnlimitedTime}
+              onClick={toggleUnlimitedTime}
+              label="Toggle unlimited time"
             />
           </div>
         )}

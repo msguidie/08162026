@@ -416,26 +416,15 @@ function getPlayerClock(
   now: number,
 ): { label: string; urgent: boolean } | null {
   if (!timeControl) return null;
-  const storedMainTime = Math.max(0, timeControl.playerTimeRemainingMs[playerIndex] ?? 0);
+  const storedTime = Math.max(0, timeControl.playerTimeRemainingMs[playerIndex] ?? 0);
   const isActive = playerIndex === currentPlayerIndex;
-
-  if (isActive && timeControl.countdownDeadline !== null) {
-    const countdown = Math.max(0, timeControl.countdownDeadline - now);
-    return { label: `${(countdown / 1000).toFixed(1)}s`, urgent: true };
-  }
-
-  if (isActive) {
+  if (isActive && timeControl.activeSince !== null) {
     const elapsed = Math.max(0, now - timeControl.activeSince);
-    const mainRemaining = Math.max(0, storedMainTime - elapsed);
-    if (mainRemaining <= 0) {
-      const impliedCountdownDeadline = timeControl.activeSince + storedMainTime + timeControl.countdownMs;
-      const countdown = Math.max(0, impliedCountdownDeadline - now);
-      return { label: `${(countdown / 1000).toFixed(1)}s`, urgent: true };
-    }
-    return { label: formatMainTime(mainRemaining), urgent: false };
+    const remaining = Math.max(0, storedTime - elapsed);
+    return { label: formatMainTime(remaining), urgent: remaining <= 10_000 };
   }
 
-  return { label: formatMainTime(storedMainTime), urgent: false };
+  return { label: formatMainTime(storedTime), urgent: false };
 }
 
 function formatMainTime(milliseconds: number): string {
