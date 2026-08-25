@@ -70,6 +70,7 @@ function lobbyState() {
       socketId: p.socketId,
       username: p.username,
       ready: p.ready,
+      wantsFirst: !!p.wantsFirst,
       avatarSeed: p.avatarSeed,
     })),
     teamMode: lobbySettings.teamMode,
@@ -233,6 +234,17 @@ function startGame() {
       socketId: p.socketId,
       avatarSeed: p.avatarSeed,
     }));
+  }
+
+  // Multiple volunteers are resolved randomly; with no volunteer, everyone
+  // remains eligible. The 1v2 solo-seat rule takes precedence in game logic.
+  if (gameOptions.gameMode !== 'ONE_V_TWO') {
+    const preferredIndices = playerInfos
+      .map((player, index) => lobbyQueue.find(entry => entry.username === player.username)?.wantsFirst ? index : -1)
+      .filter(index => index >= 0);
+    if (preferredIndices.length > 0) {
+      gameOptions.firstPlayerIndex = preferredIndices[Math.floor(Math.random() * preferredIndices.length)];
+    }
   }
 
   // Create server-authoritative game state
@@ -429,7 +441,7 @@ io.on('connection', (socket) => {
       return;
     }
     const account = accounts.get(username);
-    lobbyQueue.push({ socketId: socket.id, username, ready: false, avatarSeed: account?.avatarSeed ?? 0 });
+    lobbyQueue.push({ socketId: socket.id, username, ready: false, wantsFirst: false, avatarSeed: account?.avatarSeed ?? 0 });
 
     cb?.({ action: 'lobby', lobbyState: lobbyState() });
     broadcastLobby();
@@ -447,6 +459,20 @@ io.on('connection', (socket) => {
       broadcastLobby();
       checkAutoStart();
     }
+  });
+
+  socket.on('set_go_first', (data = {}, cb) => {
+    const { enabled } = data;
+    const player = lobbyQueue.find(p => p.socketId === socket.id);
+    if (!player) { cb?.({ error: 'Not in lobby' }); return; }
+    if (typeof enabled !== 'boolean') { cb?.({ error: 'Invalid first-player preference' }); return; }
+    if (lobbySettings.teamMode && lobbySettings.teamFormat === 'ONE_V_TWO') {
+      cb?.({ error: 'The solo player always goes first in 1v2 mode' });
+      return;
+    }
+    player.wantsFirst = enabled;
+    broadcastLobby();
+    cb?.({ ok: true });
   });
 
   // Any lobby member may switch the shared team configuration.
@@ -467,7 +493,10 @@ io.on('connection', (socket) => {
       teamSeats: [[null, null], [null, null]],
       unlimitedTime,
     } : { ...createDefaultLobbySettings(), unlimitedTime };
-    lobbyQueue.forEach(p => { p.ready = false; });
+    lobbyQueue.forEach(p => {
+      p.ready = false;
+      if (lobbySettings.teamFormat === 'ONE_V_TWO') p.wantsFirst = false;
+    });
     broadcastLobby();
     cb?.({ ok: true });
   });

@@ -41,12 +41,13 @@ interface GameStore {
   enterLobby: () => void;
   leaveLobby: () => void;
   toggleReady: () => void;
+  toggleGoFirst: () => void;
   toggleTeamMode: () => void;
   toggleTeamLayout: () => void;
   toggleUnlimitedTime: () => void;
   selectTeamSeat: (teamId: TeamId, seatIndex: 0 | 1) => void;
   setActionMode: (mode: ActionMode) => void;
-  sendAction: (action: Record<string, unknown>) => void;
+  sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => void;
   chooseBonusTile: (tileId: number) => void;
   returnToLobby: () => void;
   quitRoom: () => void;
@@ -147,6 +148,9 @@ const useGameStore = create<GameStore>((set, get) => {
       }
       // If gems were fully taken, reset mode
       if (result.type === 'SELECT_GEM' && result.payload?.completed !== false) {
+        set({ actionMode: null });
+      }
+      if (result.type === 'TAKE_GEMS_CONFIRMED') {
         set({ actionMode: null });
       }
     });
@@ -323,6 +327,15 @@ const useGameStore = create<GameStore>((set, get) => {
       get().socket?.emit('lobby_ready');
     },
 
+    toggleGoFirst: () => {
+      const { socket, myAccount, lobbyPlayers } = get();
+      if (!socket || !myAccount) return;
+      const me = lobbyPlayers.find(player => player.username === myAccount.username);
+      socket.emit('set_go_first', { enabled: !me?.wantsFirst }, (res: { error?: string }) => {
+        if (res?.error) showToast(res.error, 'warn');
+      });
+    },
+
     toggleTeamMode: () => {
       const { socket } = get();
       if (!socket) return;
@@ -391,11 +404,12 @@ const useGameStore = create<GameStore>((set, get) => {
       }
     },
 
-    sendAction: (action: Record<string, unknown>) => {
+    sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => {
       const { socket, roomId } = get();
-      if (!socket || !roomId) return;
+      if (!socket || !roomId) { onComplete?.(false); return; }
       socket.emit('game_action', { roomId, action }, (res: { error?: string }) => {
         if (res?.error) showToast(res.error, 'error');
+        onComplete?.(!res?.error);
       });
     },
 

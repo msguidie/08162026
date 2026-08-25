@@ -31,6 +31,9 @@ export default function GameBoard() {
   const [nobleClaim, setNobleClaim] = useState(false);
   const [clockNow, setClockNow] = useState(Date.now());
   const [serverClockOffset, setServerClockOffset] = useState(0);
+  const [mobilePendingGems, setMobilePendingGems] = useState<number[]>([]);
+  const [submittingMobileGems, setSubmittingMobileGems] = useState(false);
+  const isMobileLayout = useMobileLayout();
 
   // Animation state
   const [gemDeltas, setGemDeltas] = useState<GemDelta[]>([]);
@@ -103,7 +106,7 @@ export default function GameBoard() {
     const { type, payload, actingPlayer } = lastActionResult;
 
     // Gem deltas for supply animation
-    if (type === 'SELECT_GEM' && payload.completed !== false) {
+    if ((type === 'SELECT_GEM' || type === 'TAKE_GEMS_CONFIRMED') && payload.completed !== false) {
       const selected = payload.selected as number[];
       const deltaMap: Record<number, number> = {};
       for (const c of selected) deltaMap[c] = (deltaMap[c] || 0) - 1;
@@ -140,9 +143,11 @@ export default function GameBoard() {
   const actionModeRef = useRef(actionMode);
   const gameStateRef = useRef(gameState);
   const playerIndexRef = useRef(playerIndex);
+  const mobileLayoutRef = useRef(isMobileLayout);
   actionModeRef.current = actionMode;
   gameStateRef.current = gameState;
   playerIndexRef.current = playerIndex;
+  mobileLayoutRef.current = isMobileLayout;
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -154,6 +159,7 @@ export default function GameBoard() {
       const am = actionModeRef.current;
 
       if (!gs || gs.phase !== 'PLAYING' || gs.currentPlayerIndex !== pi) return;
+      if (mobileLayoutRef.current) return;
       if (am !== 'TAKE_GEMS') return;
 
       const idx = GEM_KEYS.indexOf(e.key.toLowerCase() as typeof GEM_KEYS[number]);
@@ -165,6 +171,29 @@ export default function GameBoard() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []); // Mount once, never re-register
+
+  useEffect(() => {
+    const mobileTurnActive = isMobileLayout
+      && gameState?.phase === 'PLAYING'
+      && gameState.currentPlayerIndex === playerIndex
+      && actionMode === 'TAKE_GEMS';
+    if (!mobileTurnActive) {
+      setMobilePendingGems([]);
+      setSubmittingMobileGems(false);
+    }
+  }, [isMobileLayout, actionMode, gameState?.phase, gameState?.currentPlayerIndex, playerIndex]);
+
+  useEffect(() => {
+    const turnAction = gameState?.turnAction;
+    if (!isMobileLayout
+      || gameState?.phase !== 'PLAYING'
+      || gameState.currentPlayerIndex !== playerIndex
+      || turnAction?.type !== 'TAKE_GEMS') return;
+    const serverSelection = [...turnAction.selected];
+    setMobilePendingGems(current => current.length > 0
+      ? current
+      : serverSelection);
+  }, [isMobileLayout, gameState?.phase, gameState?.currentPlayerIndex, gameState?.turnAction, playerIndex]);
 
   if (!gameState) {
     return (
@@ -187,7 +216,38 @@ export default function GameBoard() {
   }
 
   // Get selected gems for display
-  const selectedGems = gameState.turnAction?.type === 'TAKE_GEMS' ? gameState.turnAction.selected : [];
+  const serverSelectedGems = gameState.turnAction?.type === 'TAKE_GEMS' ? gameState.turnAction.selected : [];
+  const selectedGems = isMobileLayout ? mobilePendingGems : serverSelectedGems;
+  const totalHeldGems = me.gems.reduce((sum, count) => sum + count, 0);
+  const mobileGemSelectionComplete = isMobileGemTakeComplete(
+    mobilePendingGems,
+    gameState.gems,
+    totalHeldGems,
+    gameState,
+  );
+
+  const selectGem = (color: number) => {
+    if (!isMobileLayout) {
+      sendAction({ type: 'SELECT_GEM', color });
+      return;
+    }
+    setMobilePendingGems(current => canAddMobileGem(
+      color,
+      current,
+      gameState.gems,
+      totalHeldGems,
+      gameState,
+    ) ? [...current, color] : current);
+  };
+
+  const confirmMobileGemTake = () => {
+    if (!mobileGemSelectionComplete || submittingMobileGems) return;
+    setSubmittingMobileGems(true);
+    sendAction({ type: 'TAKE_GEMS_CONFIRMED', colors: [...mobilePendingGems] }, success => {
+      setSubmittingMobileGems(false);
+      if (success) setMobilePendingGems([]);
+    });
+  };
   const isTeamGame = gameState.gameMode !== 'INDIVIDUAL';
   const effectiveServerNow = clockNow + serverClockOffset;
   const activeClockPlayerIndex = gameState.phase === 'PLAYING' ? gameState.currentPlayerIndex : -1;
@@ -414,9 +474,39 @@ export default function GameBoard() {
           <div className="mt-1 w-full flex justify-center flex-shrink-0">
             <GemSupply gems={gameState.gems as [number, number, number, number, number, number]}
               gemDeltas={gemDeltas} selectedGems={selectedGems}
-              selectable={isMyTurn && actionMode === 'TAKE_GEMS'}
-              onSelectGem={color => sendAction({ type: 'SELECT_GEM', color })} />
+              selectable={isMyTurn && actionMode === 'TAKE_GEMS' && !submittingMobileGems}
+              isGemSelectable={color => !isMobileLayout || canAddMobileGem(
+                color,
+                mobilePendingGems,
+                gameState.gems,
+                totalHeldGems,
+                gameState,
+              )}
+              onSelectGem={selectGem} />
           </div>
+          {isMyTurn && actionMode === 'TAKE_GEMS' && (
+            <div className="md:hidden mobile-market-width grid grid-cols-[auto_1fr_auto] items-center gap-2 mt-0.5 px-1">
+              <button
+                type="button"
+                disabled={mobilePendingGems.length === 0 || submittingMobileGems}
+                onClick={() => setMobilePendingGems([])}
+                className="min-h-11 px-3 rounded-lg text-[10px] font-display text-slate-500 bg-white/40 border border-white/60 disabled:opacity-35 touch-manipulation"
+              >
+                Clear
+              </button>
+              <span className="text-center text-[10px] font-display text-slate-400">
+                Selected {mobilePendingGems.length}
+              </span>
+              <button
+                type="button"
+                disabled={!mobileGemSelectionComplete || submittingMobileGems}
+                onClick={confirmMobileGemTake}
+                className="min-h-11 px-4 rounded-lg text-[11px] font-display font-semibold text-white bg-[#7EA68A] disabled:bg-slate-300 disabled:text-slate-100 shadow-sm touch-manipulation"
+              >
+                {submittingMobileGems ? 'Confirming…' : 'Confirm'}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Right player */}
@@ -454,6 +544,71 @@ export default function GameBoard() {
       </div>
     </div>
   );
+}
+
+function useMobileLayout(): boolean {
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 767px)').matches);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 767px)');
+    const update = () => setIsMobile(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  return isMobile;
+}
+
+function canAddMobileGem(
+  color: number,
+  selected: number[],
+  supply: GameState['gems'],
+  playerGemCount: number,
+  state: GameState,
+): boolean {
+  if (!Number.isInteger(color) || color < 0 || color > 4) return false;
+  const adjustedSupply = supply.slice(0, 5);
+  for (const picked of selected) adjustedSupply[picked]--;
+  if (adjustedSupply[color] <= 0) return false;
+  if (playerGemCount + selected.length >= state.config.maxTokensInHand) return false;
+  if (selected.length === 0) return true;
+  if (selected.length === 1) {
+    if (selected[0] === color) return adjustedSupply[color] >= state.config.take2MinStack - 1;
+    return true;
+  }
+  if (selected.length === 2) {
+    if (selected[0] === selected[1]) return false;
+    return !selected.includes(color);
+  }
+  return false;
+}
+
+function isMobileGemTakeComplete(
+  selected: number[],
+  supply: GameState['gems'],
+  playerGemCount: number,
+  state: GameState,
+): boolean {
+  if (selected.length === 0) return false;
+  const adjustedSupply = supply.slice(0, 5);
+  for (const picked of selected) adjustedSupply[picked]--;
+  const maxCanHold = state.config.maxTokensInHand - playerGemCount;
+  if (selected.length >= maxCanHold) return true;
+  if (selected.length === 2 && selected[0] === selected[1]) return true;
+  if (selected.length === 3) return true;
+  if (selected.length === 2) {
+    const usedColors = new Set(selected);
+    return ![0, 1, 2, 3, 4].some(color => !usedColors.has(color) && adjustedSupply[color] > 0);
+  }
+  if (selected.length === 1) {
+    const color = selected[0];
+    const canTakeSame = adjustedSupply[color] >= state.config.take2MinStack - 1;
+    const hasOtherColor = [0, 1, 2, 3, 4].some(other => other !== color && adjustedSupply[other] > 0);
+    return !canTakeSame && !hasOtherColor;
+  }
+  return false;
 }
 
 function getPlayerClock(

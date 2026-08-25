@@ -13,27 +13,29 @@ interface GemSupplyProps {
   gemDeltas?: GemDelta[];
   selectedGems?: number[];
   selectable?: boolean;
+  isGemSelectable?: (color: number) => boolean;
   onSelectGem?: (color: number) => void;
 }
 
 export default function GemSupply({
-  gems, gemDeltas = [], selectedGems = [], selectable = false, onSelectGem,
+  gems, gemDeltas = [], selectedGems = [], selectable = false, isGemSelectable, onSelectGem,
 }: GemSupplyProps) {
   return (
     <div className="mobile-market-width grid grid-cols-6 items-center justify-center gap-0.5 py-1 px-1 md:w-auto md:flex md:gap-4 md:py-2 md:px-4 bg-white/30 backdrop-blur-sm rounded-xl border border-white/50">
       {gems.slice(0, 5).map((count, i) => {
         const delta = gemDeltas.find(d => d.color === i);
         const selectedCount = selectedGems.filter(c => c === i).length;
+        const colorSelectable = selectable && count > 0 && (isGemSelectable?.(i) ?? true);
         return (
           <button
             type="button"
             key={i}
-            disabled={!selectable || count === 0}
+            disabled={!colorSelectable}
             onClick={() => onSelectGem?.(i)}
             aria-pressed={selectedCount > 0}
             aria-label={`${GEM_NAMES[i]} gem, ${count} available${selectedCount ? `, selected ${selectedCount}` : ''}`}
             className={`min-w-0 min-h-11 md:min-h-0 flex flex-col items-center justify-center gap-0.5 relative rounded-lg transition touch-manipulation ${
-              selectable && count > 0
+              colorSelectable
                 ? 'cursor-pointer active:scale-95 hover:bg-white/35'
                 : 'cursor-default'
             } ${selectedCount > 0 ? 'bg-amber-50/80 ring-2 ring-amber-400/70' : ''}`}

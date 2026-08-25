@@ -117,6 +117,7 @@ export interface LobbyPlayer {
   socketId: string;
   username: string;
   ready: boolean;
+  wantsFirst: boolean;
   avatarSeed: number;
 }
 

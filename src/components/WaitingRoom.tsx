@@ -6,7 +6,7 @@ import type { LobbyPlayer, TeamId } from '../types';
 export default function WaitingRoom() {
   const {
     lobbyPlayers, lobbyTeamMode, lobbyTeamFormat, lobbyTeamLayout, lobbyTeamSeats, lobbyUnlimitedTime,
-    myAccount, toggleReady, toggleTeamMode, toggleTeamLayout, toggleUnlimitedTime,
+    myAccount, toggleReady, toggleGoFirst, toggleTeamMode, toggleTeamLayout, toggleUnlimitedTime,
     selectTeamSeat, leaveLobby,
   } = useGameStore();
 
@@ -33,6 +33,18 @@ export default function WaitingRoom() {
         lobbyTeamMode ? 'w-[34rem] max-w-full' : 'w-96 max-w-full'
       }`}>
         <h2 className="text-xl font-display font-bold text-center text-slate-800">Lobby</h2>
+
+        {!isOneVsTwo && (
+          <div className="flex items-center justify-between gap-3 rounded-xl bg-white/45 border border-white/60 px-4 py-2.5">
+            <div className="min-w-0">
+              <div className="text-sm font-display font-semibold text-slate-700">I WANT TO GO FIRST</div>
+              <div className="text-[10px] leading-tight text-slate-400">
+                Multiple volunteers are resolved randomly; otherwise everyone is eligible
+              </div>
+            </div>
+            <Switch checked={!!me?.wantsFirst} onClick={toggleGoFirst} label="Toggle first-player preference" />
+          </div>
+        )}
 
         {canShowTeamToggle && (
           <div className="flex items-center justify-between rounded-xl bg-white/45 border border-white/60 px-4 py-3">
@@ -121,9 +133,12 @@ export default function WaitingRoom() {
               >
                 <Avatar seed={p.avatarSeed} size={36} />
                 <div className="flex-1 font-medium text-sm text-slate-700">{p.username}</div>
-                <span className={`text-xs font-medium ${p.ready ? 'text-[#5B8C6A]' : 'text-slate-400'}`}>
-                  {p.ready ? '✓ Ready' : 'Not Ready'}
-                </span>
+                <div className="flex flex-col items-end gap-0.5 flex-shrink-0">
+                  {p.wantsFirst && <span className="text-[9px] font-display font-semibold text-amber-600">First</span>}
+                  <span className={`text-xs font-medium ${p.ready ? 'text-[#5B8C6A]' : 'text-slate-400'}`}>
+                    {p.ready ? '✓ Ready' : 'Not Ready'}
+                  </span>
+                </div>
               </div>
             ))}
             {lobbyPlayers.length === 0 && (
@@ -225,8 +240,11 @@ function TeamCard({ teamId, seats, title, seatCount, players, myUsername, onSele
               <>
                 <Avatar seed={player.avatarSeed} size={32} />
                 <span className="flex-1 text-left text-xs font-medium text-slate-700 truncate">{player.username}</span>
-                <span className={`text-[10px] ${player.ready ? 'text-[#5B8C6A]' : 'text-slate-400'}`}>
-                  {player.ready ? 'Ready' : 'Waiting'}
+                <span className="flex flex-col items-end gap-0.5">
+                  {player.wantsFirst && <span className="text-[8px] font-display font-semibold text-amber-600">First</span>}
+                  <span className={`text-[10px] ${player.ready ? 'text-[#5B8C6A]' : 'text-slate-400'}`}>
+                    {player.ready ? 'Ready' : 'Waiting'}
+                  </span>
                 </span>
               </>
             ) : (

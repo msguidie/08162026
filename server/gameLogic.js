@@ -208,8 +208,15 @@ function createInitialGameState(players, options = {}) {
   }));
 
   // The solo player occupies seat zero and always opens a 1v2 game.
-  // All other modes start with a randomly selected player.
-  const actualFirstPlayer = gameMode === 'ONE_V_TWO' ? 0 : Math.floor(Math.random() * n);
+  // Other modes honor a server-validated lobby preference, falling back to random.
+  const preferredFirstPlayer = Number.isInteger(options.firstPlayerIndex)
+    && options.firstPlayerIndex >= 0
+    && options.firstPlayerIndex < n
+    ? options.firstPlayerIndex
+    : null;
+  const actualFirstPlayer = gameMode === 'ONE_V_TWO'
+    ? 0
+    : preferredFirstPlayer ?? Math.floor(Math.random() * n);
   const now = Date.now();
   const teams = isTeamGame ? [0, 1].map(id => ({
     id,
@@ -387,6 +394,56 @@ function processAction(state, playerIndex, action) {
 
       result.payload = { selected: [...selected], completed: false };
       return { ok: true, result, completed: false };
+    }
+
+    case 'TAKE_GEMS_CONFIRMED': {
+      const { colors } = action;
+      if (!Array.isArray(colors) || colors.length < 1 || colors.length > 3) {
+        return { error: 'Invalid gem selection' };
+      }
+      if (state.turnAction && state.turnAction.type !== 'TAKE_GEMS') {
+        return { error: 'Finish your current action first' };
+      }
+
+      // A player may resize/reconnect after starting incremental desktop
+      // selection. Preserve that committed prefix when finishing on mobile.
+      const existingSelected = state.turnAction?.type === 'TAKE_GEMS'
+        ? state.turnAction.selected
+        : [];
+      if (existingSelected.some((color, index) => colors[index] !== color)) {
+        return { error: 'Confirmed gems do not match the current selection' };
+      }
+
+      // Validate the entire mobile selection against the same rules used by
+      // incremental desktop selection before mutating any game state.
+      const selected = [];
+      const supply = state.gems.slice(0, 5);
+      for (const color of colors) {
+        if (!Number.isInteger(color) || color < 0 || color > 4) {
+          return { error: 'Invalid gem color' };
+        }
+        const adjustedSupply = [...supply];
+        for (const picked of selected) adjustedSupply[picked]--;
+        if (!canSelectGem(color, selected, adjustedSupply, totalGems(player), state.config)) {
+          return { error: 'Cannot select this gem' };
+        }
+        selected.push(color);
+      }
+
+      const finalSupply = [...supply];
+      for (const picked of selected) finalSupply[picked]--;
+      if (!isGemTakeComplete(selected, finalSupply, totalGems(player), state.config)) {
+        return { error: 'Select all required gems before confirming' };
+      }
+
+      for (const picked of selected) {
+        player.gems[picked]++;
+        state.gems[picked]--;
+      }
+      result.payload = { selected: [...selected] };
+      state.turnAction = null;
+      advanceTurn(state);
+      return { ok: true, result, completed: true };
     }
 
     case 'ENTER_RESERVE': {
