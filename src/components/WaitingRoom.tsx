@@ -28,8 +28,8 @@ export default function WaitingRoom() {
   const isOneVsTwo = lobbyTeamFormat === 'ONE_V_TWO';
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <div className={`bg-white/60 backdrop-blur-md rounded-2xl p-8 space-y-5 border border-white/70 shadow-lg transition-all ${
+    <div className="min-h-[100dvh] flex items-center justify-center p-2 sm:p-4">
+      <div className={`bg-white/60 backdrop-blur-md rounded-2xl p-4 sm:p-8 space-y-4 sm:space-y-5 border border-white/70 shadow-lg transition-all max-h-[calc(100dvh-1rem)] overflow-y-auto ${
         lobbyTeamMode ? 'w-[34rem] max-w-full' : 'w-96 max-w-full'
       }`}>
         <h2 className="text-xl font-display font-bold text-center text-slate-800">Lobby</h2>
@@ -177,11 +177,13 @@ function Switch({ checked, onClick, label }: { checked: boolean; onClick: () => 
       aria-label={label}
       aria-checked={checked}
       onClick={onClick}
-      className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-[#7EA68A]' : 'bg-slate-300'}`}
+      className="w-11 h-11 sm:h-6 flex-shrink-0 flex items-center justify-center touch-manipulation"
     >
-      <span className={`absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
-        checked ? 'translate-x-5' : 'translate-x-0'
-      }`} />
+      <span className={`relative block w-11 h-6 rounded-full transition-colors ${checked ? 'bg-[#7EA68A]' : 'bg-slate-300'}`}>
+        <span className={`absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
+          checked ? 'translate-x-5' : 'translate-x-0'
+        }`} />
+      </span>
     </button>
   );
 }

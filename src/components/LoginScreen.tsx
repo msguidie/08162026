@@ -98,8 +98,8 @@ export default function LoginScreen() {
 
   if (myAccount) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-4">
-        <div className="bg-white/60 backdrop-blur-md rounded-2xl p-8 w-80 text-center space-y-4 border border-white/70 shadow-lg">
+      <div className="min-h-[100dvh] flex items-center justify-center p-4">
+        <div className="bg-white/60 backdrop-blur-md rounded-2xl p-5 sm:p-8 w-80 max-w-full text-center space-y-4 border border-white/70 shadow-lg">
           <Avatar seed={myAccount.avatarSeed} size={64} />
           <h2 className="text-xl font-display font-bold text-slate-800">{myAccount.username}</h2>
           <p className="text-sm text-slate-500">Rating: {myAccount.rating} | Wins: {myAccount.wins}</p>
@@ -112,8 +112,8 @@ export default function LoginScreen() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <div className="bg-white/60 backdrop-blur-md rounded-2xl p-8 w-80 space-y-5 border border-white/70 shadow-lg">
+    <div className="min-h-[100dvh] flex items-center justify-center p-4">
+      <div className="bg-white/60 backdrop-blur-md rounded-2xl p-5 sm:p-8 w-80 max-w-full space-y-5 border border-white/70 shadow-lg">
         <h1 className="text-3xl font-display font-bold text-center tracking-tight text-slate-800">Splendor</h1>
 
         {!connected ? (

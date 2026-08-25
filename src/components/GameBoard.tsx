@@ -38,15 +38,26 @@ export default function GameBoard() {
 
   // Track previous reward counts for +1 animation
   const prevRewardsRef = useRef<Record<number, number[]>>({});
+  const fullscreenSupported = typeof document !== 'undefined'
+    && !!document.fullscreenEnabled
+    && typeof document.documentElement.requestFullscreen === 'function';
 
   // ── Fullscreen toggle ──
-  const toggleFullscreen = useCallback(() => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
+  const toggleFullscreen = useCallback(async () => {
+    try {
+      if (!document.fullscreenElement) {
+        if (!document.fullscreenEnabled) return;
+        await document.documentElement.requestFullscreen();
+        const orientation = screen.orientation as ScreenOrientation & {
+          lock?: (mode: 'portrait') => Promise<void>;
+        };
+        await orientation.lock?.('portrait').catch(() => {});
+      } else {
+        screen.orientation?.unlock?.();
+        await document.exitFullscreen();
+      }
+    } catch {
+      // Unsupported mobile browsers keep the responsive layout without fullscreen.
     }
   }, []);
 
@@ -190,9 +201,9 @@ export default function GameBoard() {
   const useSideLayout = others.length >= 2;
 
   return (
-    <div className="h-screen flex flex-col p-1 max-w-6xl mx-auto relative overflow-hidden">
+    <div className="game-shell flex flex-col max-w-6xl mx-auto relative overflow-x-hidden overflow-y-auto md:overflow-hidden md:p-1">
       {/* ── Top-right controls: fullscreen + menu ── */}
-      <div className="absolute top-1 right-1 z-30 flex items-center gap-1">
+      <div className="absolute top-1 right-1 z-30 flex items-center gap-0.5 md:gap-1">
         {/* Turn indicator - subtle */}
         {gameState.phase === 'PLAYING' && (
           <div className="text-[10px] text-slate-400 mr-2 font-display">
@@ -200,18 +211,20 @@ export default function GameBoard() {
             {gameState.finalRoundTriggeredBy !== null && <span className="text-red-400 ml-1">Final</span>}
           </div>
         )}
-        <button onClick={toggleFullscreen} className="p-1 text-slate-400 hover:text-slate-600 transition" title="Toggle fullscreen">
-          {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
-        </button>
+        {fullscreenSupported && (
+          <button onClick={toggleFullscreen} className="w-11 h-11 md:w-auto md:h-auto md:p-1 flex items-center justify-center text-slate-400 hover:text-slate-600 transition touch-manipulation" title="Toggle fullscreen" aria-label="Toggle fullscreen">
+            {isFullscreen ? <Minimize className="w-[18px] h-[18px] md:w-3.5 md:h-3.5" /> : <Maximize className="w-[18px] h-[18px] md:w-3.5 md:h-3.5" />}
+          </button>
+        )}
         <div className="relative">
-          <button onClick={() => setShowMenu(!showMenu)} className="p-1 text-slate-400 hover:text-slate-600 transition">
-            <MoreVertical size={14} />
+          <button onClick={() => setShowMenu(!showMenu)} className="w-11 h-11 md:w-auto md:h-auto md:p-1 flex items-center justify-center text-slate-400 hover:text-slate-600 transition touch-manipulation" aria-label="Open game menu">
+            <MoreVertical className="w-[18px] h-[18px] md:w-3.5 md:h-3.5" />
           </button>
           {showMenu && (
-            <div className="absolute right-0 top-6 bg-white/90 backdrop-blur-md rounded-lg shadow-lg border border-white/70 py-1 w-32 z-50">
-              <button onClick={() => { setShowQuitConfirm(true); setShowMenu(false); }} className="w-full text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100">Quit Room</button>
+            <div className="absolute right-0 top-11 md:top-6 bg-white/90 backdrop-blur-md rounded-lg shadow-lg border border-white/70 py-1 w-36 md:w-32 z-50">
+              <button onClick={() => { setShowQuitConfirm(true); setShowMenu(false); }} className="w-full min-h-11 md:min-h-0 text-left px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100">Quit Room</button>
               {gameState.phase === 'PLAYING' && (
-                <button onClick={() => { setShowResignConfirm(true); setShowMenu(false); }} className="w-full text-left px-3 py-1.5 text-xs text-red-500 hover:bg-red-50">Resign</button>
+                <button onClick={() => { setShowResignConfirm(true); setShowMenu(false); }} className="w-full min-h-11 md:min-h-0 text-left px-3 py-1.5 text-xs text-red-500 hover:bg-red-50">Resign</button>
               )}
             </div>
           )}
@@ -240,9 +253,9 @@ export default function GameBoard() {
       {/* ── Game Over overlay ── */}
       <AnimatePresence>
         {gameState.phase === 'GAME_OVER' && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center backdrop-blur-sm">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-3 backdrop-blur-sm">
             <motion.div initial={{ scale: 0.8 }} animate={{ scale: 1 }}
-              className="bg-white/80 backdrop-blur-md rounded-2xl p-8 max-w-md w-full space-y-4 border border-white/70 shadow-xl">
+              className="bg-white/80 backdrop-blur-md rounded-2xl p-4 md:p-8 max-w-md w-full max-h-[calc(100dvh-1.5rem)] overflow-y-auto space-y-4 border border-white/70 shadow-xl">
               {isTeamGame ? (
                 <TeamGameOver gameState={gameState} />
               ) : (
@@ -282,10 +295,10 @@ export default function GameBoard() {
       {/* ── Bonus tile choice modal ── */}
       <AnimatePresence>
         {pendingTileChoice && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center backdrop-blur-sm">
-            <motion.div initial={{ scale: 0.8 }} animate={{ scale: 1 }} className="bg-white/80 backdrop-blur-md rounded-2xl p-6 space-y-4 border border-white/70 shadow-xl">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center p-3 backdrop-blur-sm">
+            <motion.div initial={{ scale: 0.8 }} animate={{ scale: 1 }} className="bg-white/80 backdrop-blur-md rounded-2xl p-4 md:p-6 w-full max-w-sm space-y-4 border border-white/70 shadow-xl">
               <h3 className="text-lg font-display font-bold text-center text-[#7B6FA0]">Choose a Noble</h3>
-              <div className="flex gap-3 justify-center">
+              <div className="flex gap-2 md:gap-3 justify-center flex-wrap">
                 {gameState.bonusTiles.filter(t => pendingTileChoice.includes(t.id)).map(tile => (
                   <TileChoice key={tile.id} tile={tile} onPick={() => chooseBonusTile(tile.id)} />
                 ))}
@@ -310,8 +323,27 @@ export default function GameBoard() {
       )}
 
       {/* ── Top opponents (for 2-player or 4+ middle players) ── */}
+      {others.length > 0 && (
+        <div
+          className="grid md:hidden gap-1 mt-11 mb-1 flex-shrink-0"
+          style={{ gridTemplateColumns: `repeat(${others.length}, minmax(0, 1fr))` }}
+        >
+          {others.map(({ player, idx, resigned }) => (
+            <div key={idx} data-player-panel={idx} className={`relative min-w-0 ${resigned ? 'opacity-35 pointer-events-none' : ''}`}>
+              {resigned && <div className="absolute top-0.5 right-0.5 z-10 text-[7px] leading-none text-red-500 font-display">OUT</div>}
+              <PlayerInfo player={player} isMe={false} mobile
+                isCurrentTurn={!resigned && gameState.currentPlayerIndex === idx}
+                isDisconnected={disconnectedPlayers.has(player.username)}
+                gameMode={gameState.gameMode}
+                clockLabel={playerClocks[idx]?.label} clockUrgent={playerClocks[idx]?.urgent}
+                cardDeltas={opponentCardDeltas[idx] || {}} />
+            </div>
+          ))}
+        </div>
+      )}
+
       {topPlayers.length > 0 && (
-        <div className="flex gap-3 justify-center mt-5 mb-1 flex-wrap flex-shrink-0">
+        <div className="hidden md:flex gap-3 justify-center mt-5 mb-1 flex-wrap flex-shrink-0">
           {topPlayers.map(({ player, idx, resigned }) => (
             <div key={idx} data-player-panel={idx}
               className={`flex-1 min-w-[220px] max-w-[280px] ${resigned ? 'opacity-30 pointer-events-none' : ''}`}>
@@ -327,10 +359,10 @@ export default function GameBoard() {
       )}
 
       {/* ── Main 3-column layout ── */}
-      <div className="flex-1 flex items-start gap-1 min-h-0">
+      <div className="w-full flex-none md:flex-1 flex items-start gap-1 md:min-h-0">
         {/* Left player */}
         {useSideLayout && leftPlayer && (
-          <div data-player-panel={leftPlayer.idx} className={`w-[230px] flex flex-col items-center pt-1 flex-shrink-0 ${leftPlayer.resigned ? 'opacity-30' : ''}`}>
+          <div data-player-panel={leftPlayer.idx} className={`hidden md:flex w-[230px] flex-col items-center pt-1 flex-shrink-0 ${leftPlayer.resigned ? 'opacity-30' : ''}`}>
             <PlayerInfo player={leftPlayer.player} isMe={false} isCurrentTurn={!leftPlayer.resigned && gameState.currentPlayerIndex === leftPlayer.idx}
               compact isDisconnected={disconnectedPlayers.has(leftPlayer.player.username)}
               gameMode={gameState.gameMode}
@@ -340,13 +372,14 @@ export default function GameBoard() {
         )}
 
         {/* Center: board + gems */}
-        <div className="flex-1 flex flex-col items-center gap-1 min-h-0">
-          <div className="flex gap-3 justify-center items-start">
+        <div className="w-full flex-none md:flex-1 flex flex-col items-center gap-1 md:min-h-0">
+          <div className="mobile-market-width flex flex-col gap-1 items-center md:w-auto md:flex-row md:gap-3 md:justify-center md:items-start">
             {/* Card board */}
-            <div className="flex flex-col gap-1 items-center">
+            <div className="order-2 md:order-1 mobile-market-width flex flex-col gap-1 items-center md:w-auto">
               {[2, 1, 0].map(tierIdx => (
-                <div key={tierIdx} className="flex gap-1 items-center">
+                <div key={tierIdx} className="w-full grid grid-cols-5 gap-[3px] items-stretch md:w-auto md:flex md:gap-1 md:items-center">
                   <DeckView tier={tierIdx + 1} count={gameState.deckCounts[tierIdx]}
+                    size="market"
                     clickable={isMyTurn && actionMode === 'RESERVE' && me.reserved.length < gameState.config.maxReserved}
                     onClick={() => sendAction({ type: 'RESERVE_FROM_DECK', tier: tierIdx + 1 })} />
                   <AnimatePresence mode="popLayout">
@@ -355,7 +388,7 @@ export default function GameBoard() {
                         initial={{ scaleX: 0, opacity: 0.4 }} animate={{ scaleX: 1, opacity: 1 }}
                         exit={{ scale: 0.4, opacity: 0, transition: { duration: 0.28 } }}
                         transition={{ duration: 0.22 }} data-card-id={card.id}>
-                        <CardView card={card}
+                        <CardView card={card} size="market"
                           clickable={isMyTurn && (actionMode === 'BUY' || actionMode === 'RESERVE')}
                           onClick={() => {
                             if (actionMode === 'BUY') sendAction({ type: 'BUY_CARD', cardId: card.id, source: 'board' });
@@ -365,26 +398,30 @@ export default function GameBoard() {
                     ))}
                   </AnimatePresence>
                   {Array.from({ length: Math.max(0, 4 - gameState.board[tierIdx].length) }).map((_, i) => (
-                    <div key={`e${tierIdx}-${i}`} className="w-[88px] h-[122px] rounded-lg border border-slate-200/40 border-dashed" />
+                    <div key={`e${tierIdx}-${i}`} className="market-card-size rounded-lg border border-slate-200/40 border-dashed" />
                   ))}
                 </div>
               ))}
             </div>
 
             {/* Noble tiles */}
-            <NobleTiles tiles={gameState.bonusTiles} />
+            <div className="order-1 md:order-2 w-full md:w-auto">
+              <NobleTiles tiles={gameState.bonusTiles} />
+            </div>
           </div>
 
           {/* Gem supply */}
-          <div className="mt-1 flex-shrink-0">
+          <div className="mt-1 w-full flex justify-center flex-shrink-0">
             <GemSupply gems={gameState.gems as [number, number, number, number, number, number]}
-              gemDeltas={gemDeltas} selectedGems={selectedGems} />
+              gemDeltas={gemDeltas} selectedGems={selectedGems}
+              selectable={isMyTurn && actionMode === 'TAKE_GEMS'}
+              onSelectGem={color => sendAction({ type: 'SELECT_GEM', color })} />
           </div>
         </div>
 
         {/* Right player */}
         {useSideLayout && rightPlayer && (
-          <div data-player-panel={rightPlayer.idx} className={`w-[230px] flex flex-col items-center pt-1 flex-shrink-0 ${rightPlayer.resigned ? 'opacity-30' : ''}`}>
+          <div data-player-panel={rightPlayer.idx} className={`hidden md:flex w-[230px] flex-col items-center pt-1 flex-shrink-0 ${rightPlayer.resigned ? 'opacity-30' : ''}`}>
             <PlayerInfo player={rightPlayer.player} isMe={false} isCurrentTurn={!rightPlayer.resigned && gameState.currentPlayerIndex === rightPlayer.idx}
               compact isDisconnected={disconnectedPlayers.has(rightPlayer.player.username)}
               gameMode={gameState.gameMode}
@@ -395,7 +432,17 @@ export default function GameBoard() {
       </div>
 
       {/* ── Bottom: self panel (action buttons integrated) ── */}
-      <div className="flex-shrink-0 mt-1" data-player-panel={playerIndex}>
+      <div className="md:hidden flex-shrink-0 mt-auto pt-1 w-full max-w-[600px] mx-auto" data-player-panel={playerIndex}>
+        <PlayerInfo player={me} isMe={true} mobile isCurrentTurn={isMyTurn}
+          actionMode={actionMode} gameState={gameState} playerIndex={playerIndex}
+          gameMode={gameState.gameMode}
+          clockLabel={playerClocks[playerIndex]?.label} clockUrgent={playerClocks[playerIndex]?.urgent}
+          onSetActionMode={setActionMode}
+          onClickCard={(card, source) => {
+            if (actionMode === 'BUY') sendAction({ type: 'BUY_CARD', cardId: card.id, source });
+          }} />
+      </div>
+      <div className="hidden md:block flex-shrink-0 mt-1" data-player-panel={playerIndex}>
         <PlayerInfo player={me} isMe={true} isCurrentTurn={isMyTurn}
           actionMode={actionMode} gameState={gameState} playerIndex={playerIndex}
           gameMode={gameState.gameMode}
@@ -496,14 +543,14 @@ function ConfirmModal({ title, message, confirmLabel, confirmColor, onConfirm, o
 }) {
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-      className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center backdrop-blur-sm">
+      className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-3 backdrop-blur-sm">
       <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9 }}
-        className="bg-white/80 backdrop-blur-md rounded-2xl p-6 w-80 space-y-4 border border-white/70 shadow-xl">
+        className="bg-white/80 backdrop-blur-md rounded-2xl p-4 md:p-6 w-full max-w-80 space-y-4 border border-white/70 shadow-xl">
         <h3 className="text-lg font-display font-bold text-center text-slate-800">{title}</h3>
         <p className="text-sm text-slate-500 text-center">{message}</p>
         <div className="flex gap-2">
-          <button onClick={onCancel} className="flex-1 py-2 bg-white/60 hover:bg-white/80 border border-slate-200 rounded-xl text-sm transition text-slate-600">Cancel</button>
-          <button onClick={onConfirm} className={`flex-1 py-2 ${confirmColor} hover:opacity-80 text-white rounded-xl text-sm font-semibold transition shadow-sm`}>{confirmLabel}</button>
+          <button onClick={onCancel} className="flex-1 min-h-11 md:min-h-0 py-2 bg-white/60 hover:bg-white/80 border border-slate-200 rounded-xl text-sm transition text-slate-600">Cancel</button>
+          <button onClick={onConfirm} className={`flex-1 min-h-11 md:min-h-0 py-2 ${confirmColor} hover:opacity-80 text-white rounded-xl text-sm font-semibold transition shadow-sm`}>{confirmLabel}</button>
         </div>
       </motion.div>
     </motion.div>
@@ -513,7 +560,7 @@ function ConfirmModal({ title, message, confirmLabel, confirmColor, onConfirm, o
 function TileChoice({ tile, onPick }: { tile: BonusTile; onPick: () => void }) {
   return (
     <button onClick={onPick}
-      className="w-20 h-20 bg-white/60 border-2 border-[#9B8EC4]/50 hover:border-amber-500 rounded-xl flex flex-col items-center justify-center p-1 transition shadow-sm">
+      className="w-16 h-16 md:w-20 md:h-20 bg-white/60 border-2 border-[#9B8EC4]/50 hover:border-amber-500 rounded-xl flex flex-col items-center justify-center p-1 transition shadow-sm touch-manipulation">
       <span className="text-sm font-display font-bold text-[#7B6FA0] mb-1">+3</span>
       <div className="flex gap-0.5 flex-wrap justify-center">
         {tile.requirement.map((r, i) => r > 0 ? (

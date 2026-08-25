@@ -7,14 +7,16 @@ interface CardViewProps {
   card: Card;
   onClick?: () => void;
   clickable?: boolean;
-  size?: 'sm' | 'md' | 'lg';
+  size?: 'xs' | 'sm' | 'md' | 'lg' | 'market';
 }
 
 export default function CardView({ card, onClick, clickable = false, size = 'md' }: CardViewProps) {
   const dims = {
+    xs: { w: 'w-11', h: 'h-[61px]', text: 'text-[8px]', pt: 'text-[11px]', dot: 'w-2.5 h-2.5', cdot: 'w-2 h-2', gap: 'gap-0' },
     sm: { w: 'w-16', h: 'h-[88px]', text: 'text-[10px]', pt: 'text-sm', dot: 'w-3 h-3', cdot: 'w-2.5 h-2.5', gap: 'gap-px' },
     md: { w: 'w-[88px]', h: 'h-[122px]', text: 'text-xs', pt: 'text-lg', dot: 'w-4 h-4', cdot: 'w-3 h-3', gap: 'gap-0.5' },
     lg: { w: 'w-28', h: 'h-[154px]', text: 'text-sm', pt: 'text-xl', dot: 'w-5 h-5', cdot: 'w-3.5 h-3.5', gap: 'gap-0.5' },
+    market: { w: 'market-card-size', h: '', text: 'text-[9px] md:text-xs', pt: 'text-sm md:text-lg', dot: 'w-3 h-3 md:w-4 md:h-4', cdot: 'w-2.5 h-2.5 md:w-3 md:h-3', gap: 'gap-px md:gap-0.5' },
   };
   const d = dims[size];
 
@@ -62,8 +64,8 @@ export default function CardView({ card, onClick, clickable = false, size = 'md'
   );
 }
 
-export function DeckView({ tier, count, onClick, clickable }: {
-  tier: number; count: number; onClick?: () => void; clickable?: boolean;
+export function DeckView({ tier, count, onClick, clickable, size = 'md' }: {
+  tier: number; count: number; onClick?: () => void; clickable?: boolean; size?: 'md' | 'market';
 }) {
   const tierColors = ['#4DAA8D', '#5B7CC4', '#8E6FBF'];
   const color = tierColors[tier - 1] || '#666';
@@ -72,14 +74,14 @@ export function DeckView({ tier, count, onClick, clickable }: {
     <motion.div
       whileHover={clickable ? { scale: 1.05 } : undefined}
       whileTap={clickable ? { scale: 0.95 } : undefined}
-      onClick={clickable ? onClick : undefined}
-      className={`w-[88px] h-[122px] rounded-lg border-2 border-dashed flex flex-col items-center justify-center ${
+      onClick={clickable && count > 0 ? onClick : undefined}
+      className={`${size === 'market' ? 'market-card-size' : 'w-[88px] h-[122px]'} rounded-lg border-2 border-dashed flex flex-col items-center justify-center ${
         clickable && count > 0 ? 'cursor-pointer hover:border-amber-500/70' : 'opacity-30'
       }`}
       style={{ borderColor: `${color}60`, background: `${color}0A` }}
     >
-      <span className="text-base font-bold" style={{ color }}>{count}</span>
-      <span className="text-xs mt-0.5" style={{ color: `${color}80` }}>L{tier}</span>
+      <span className="text-sm md:text-base font-bold" style={{ color }}>{count}</span>
+      <span className="text-[10px] md:text-xs mt-0.5" style={{ color: `${color}80` }}>L{tier}</span>
     </motion.div>
   );
 }

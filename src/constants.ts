@@ -1,5 +1,5 @@
-// Server URL - update after deploying to Render
-export const SERVER_URL = 'https://zero8162026.onrender.com';
+// Vercel can override this with VITE_SERVER_URL; production keeps the current Render backend.
+export const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'https://zero8162026.onrender.com';
 
 export const CONNECTION_CONFIG = {
   HEARTBEAT_INTERVAL: 10000,

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Splendor</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -30,6 +30,36 @@
       }
       * { box-sizing: border-box; }
       h1, h2, h3, .font-display { font-family: 'Space Grotesk', 'Inter', sans-serif; }
+
+      .game-shell { height: 100vh; }
+      .market-card-size { width: 88px; height: 122px; }
+
+      @supports (height: 100dvh) {
+        .game-shell { height: 100dvh; }
+      }
+
+      @media (max-width: 767px) {
+        html, body, #root { min-height: 100%; }
+        body {
+          min-height: 100dvh;
+          overscroll-behavior: none;
+          -webkit-text-size-adjust: 100%;
+          -webkit-tap-highlight-color: transparent;
+        }
+        .game-shell {
+          padding-top: max(4px, env(safe-area-inset-top));
+          padding-right: max(4px, env(safe-area-inset-right));
+          padding-bottom: max(4px, env(safe-area-inset-bottom));
+          padding-left: max(4px, env(safe-area-inset-left));
+          touch-action: manipulation;
+        }
+        .mobile-market-width { width: min(100%, 430px); }
+        .market-card-size {
+          width: 100%;
+          height: auto;
+          aspect-ratio: 88 / 122;
+        }
+      }
     </style>
   </head>
   <body>
