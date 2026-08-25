@@ -25,6 +25,9 @@ interface PlayerInfoProps {
   playerIndex?: number;
   onSetActionMode?: (mode: ActionMode) => void;
   onClickCard?: (card: { id: number; tier: number; reward: number; points: number; cost: number[] }, source: 'board' | 'reserved') => void;
+  onConfirmGems?: () => void;
+  canConfirmGems?: boolean;
+  isConfirmingGems?: boolean;
 }
 
 function MiniCardTile({ color, size = 'md' }: { color: number; size?: 'xs' | 'sm' | 'md' }) {
@@ -45,6 +48,7 @@ export default function PlayerInfo({
   player, isMe, isCurrentTurn, mobile = false, compact = false, isPulsing = false,
   isDisconnected = false, clockLabel, clockUrgent = false, gameMode = 'INDIVIDUAL', cardDeltas = {},
   actionMode, gameState, playerIndex, onSetActionMode, onClickCard,
+  onConfirmGems, canConfirmGems = false, isConfirmingGems = false,
 }: PlayerInfoProps) {
   const rewards = getRewardCounts(player);
 
@@ -268,14 +272,20 @@ export default function PlayerInfo({
 
         {myTurn && onSetActionMode && !pendingTileChoice && (
           <div className="grid grid-cols-3 gap-1 mt-1 border-t border-white/60 pt-1">
-            <ActionBtn mobile label="Take Gems" active={actionMode === 'TAKE_GEMS'}
-              disabled={reserveLocked}
-              onClick={() => onSetActionMode(actionMode === 'TAKE_GEMS' ? null : 'TAKE_GEMS')} />
+            <ActionBtn mobile
+              label={actionMode === 'TAKE_GEMS'
+                ? (isConfirmingGems ? 'Confirming…' : 'Confirm')
+                : 'Take Gems'}
+              active={actionMode === 'TAKE_GEMS'}
+              disabled={reserveLocked || (actionMode === 'TAKE_GEMS' && (!canConfirmGems || isConfirmingGems))}
+              onClick={() => actionMode === 'TAKE_GEMS'
+                ? onConfirmGems?.()
+                : onSetActionMode('TAKE_GEMS')} />
             <ActionBtn mobile label="Reserve" active={reserveLocked}
-              disabled={reserveLocked || player.reserved.length >= maxReserved}
+              disabled={reserveLocked || isConfirmingGems || player.reserved.length >= maxReserved}
               onClick={() => onSetActionMode('RESERVE')} />
             <ActionBtn mobile label="Buy Card" active={actionMode === 'BUY'}
-              disabled={reserveLocked}
+              disabled={reserveLocked || isConfirmingGems}
               onClick={() => onSetActionMode(actionMode === 'BUY' ? null : 'BUY')} />
             {reserveLocked && (
               <div className="col-span-3 text-center text-[9px] leading-none text-amber-600/80 font-display">
@@ -409,7 +419,7 @@ function ActionBtn({ label, active, onClick, disabled, mobile = false }: {
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`${mobile ? 'min-h-11 px-1 py-1 text-[10px]' : 'px-3 py-1 text-[11px]'} rounded-lg font-medium transition font-display shadow-sm touch-manipulation ${
+      className={`${mobile ? 'min-h-11 px-1 py-1 text-[10px]' : 'px-3 py-1 text-[11px]'} rounded-lg font-medium transition font-display shadow-sm touch-manipulation disabled:opacity-40 ${
         active
           ? 'bg-amber-500/20 text-amber-700 border border-amber-400/40'
           : disabled

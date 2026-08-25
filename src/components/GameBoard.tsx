@@ -484,29 +484,6 @@ export default function GameBoard() {
               )}
               onSelectGem={selectGem} />
           </div>
-          {isMyTurn && actionMode === 'TAKE_GEMS' && (
-            <div className="md:hidden mobile-market-width grid grid-cols-[auto_1fr_auto] items-center gap-2 mt-0.5 px-1">
-              <button
-                type="button"
-                disabled={mobilePendingGems.length === 0 || submittingMobileGems}
-                onClick={() => setMobilePendingGems([])}
-                className="min-h-11 px-3 rounded-lg text-[10px] font-display text-slate-500 bg-white/40 border border-white/60 disabled:opacity-35 touch-manipulation"
-              >
-                Clear
-              </button>
-              <span className="text-center text-[10px] font-display text-slate-400">
-                Selected {mobilePendingGems.length}
-              </span>
-              <button
-                type="button"
-                disabled={!mobileGemSelectionComplete || submittingMobileGems}
-                onClick={confirmMobileGemTake}
-                className="min-h-11 px-4 rounded-lg text-[11px] font-display font-semibold text-white bg-[#7EA68A] disabled:bg-slate-300 disabled:text-slate-100 shadow-sm touch-manipulation"
-              >
-                {submittingMobileGems ? 'Confirming…' : 'Confirm'}
-              </button>
-            </div>
-          )}
         </div>
 
         {/* Right player */}
@@ -528,6 +505,9 @@ export default function GameBoard() {
           gameMode={gameState.gameMode}
           clockLabel={playerClocks[playerIndex]?.label} clockUrgent={playerClocks[playerIndex]?.urgent}
           onSetActionMode={setActionMode}
+          onConfirmGems={confirmMobileGemTake}
+          canConfirmGems={mobileGemSelectionComplete}
+          isConfirmingGems={submittingMobileGems}
           onClickCard={(card, source) => {
             if (actionMode === 'BUY') sendAction({ type: 'BUY_CARD', cardId: card.id, source });
           }} />
