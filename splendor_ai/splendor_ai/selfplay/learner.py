@@ -36,7 +36,7 @@ import os
 import queue
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -46,7 +46,23 @@ from ..model import (ACTION_VERSION, SplendorNet, compute_loss, load_checkpoint,
                      save_checkpoint)
 from .config import RunConfig
 
-__all__ = ["Learner", "lr_at", "BatchPrefetcher", "DDP_NOT_WIRED"]
+__all__ = ["Learner", "lr_at", "BatchPrefetcher", "DDP_NOT_WIRED",
+           "MILESTONE_GENERATIONS", "is_milestone_generation"]
+
+#: Generations kept for ever, whatever the retention policy says.  Early
+#: generations are the ones a post-mortem wants (the learning curve is steepest
+#: there) and they are cheap; after 80 the ladder thins out to every 40th.
+MILESTONE_GENERATIONS = (5, 10, 20, 40, 80)
+#: ...and every N-th generation once past the last explicit milestone.
+MILESTONE_EVERY = 40
+
+
+def is_milestone_generation(generation: int) -> bool:
+    """Is ``generation`` kept for ever by the retention policy?"""
+    gen = int(generation)
+    if gen in MILESTONE_GENERATIONS:
+        return True
+    return gen > MILESTONE_GENERATIONS[-1] and gen % MILESTONE_EVERY == 0
 
 #: Why ``WORLD_SIZE > 1`` is refused rather than silently half-supported.
 DDP_NOT_WIRED = (
@@ -307,9 +323,66 @@ class Learner:
         if self.rank != 0:
             return ""
         path = os.path.join(self.cfg.checkpoints_dir, f"gen_{generation:04d}.pt")
-        return save_checkpoint(path, self.model,
-                               {"step": self.step, "generation": generation,
-                                "meta": {"version": self.published}})
+        out = save_checkpoint(path, self.model,
+                              {"step": self.step, "generation": generation,
+                               "meta": {"version": self.published}})
+        if self.cfg.learner.checkpoint_retention:
+            # Never the one just written, whatever the policy says: the caller
+            # hands it straight to the evaluator and the opponent pool.
+            self.prune_checkpoints(keep=(os.path.basename(path),))
+        return out
+
+    def prune_checkpoints(self, keep: Sequence[str] = ()) -> List[str]:
+        """Delete generation checkpoints nothing needs any more.
+
+        A 12.6M-parameter checkpoint is ~150 MB (weights + metadata) and the
+        production run seals a generation every ~20k games: a 120 h chain
+        writes on the order of a thousand of them, ~125 GB, into a project
+        filesystem with a quota.  Nothing reads most of them -- the opponent
+        pool only draws from the last ``selfplay.historical_pool_size``, and
+        the arena is run against a handful of named checkpoints.
+
+        Kept: the last ``historical_pool_size`` generations (the live opponent
+        pool -- deleting one of those would pull an opponent out from under a
+        running actor) and the milestone ladder
+        (:data:`MILESTONE_GENERATIONS`, then every
+        :data:`MILESTONE_EVERY`-th).  Every deletion is logged.
+        """
+        directory = self.cfg.checkpoints_dir
+        pool = max(0, int(self.cfg.selfplay.historical_pool_size))
+        try:
+            names = sorted(f for f in os.listdir(directory)
+                           if f.startswith("gen_") and f.endswith(".pt"))
+        except OSError:                                     # pragma: no cover
+            return []
+        keep_recent = set(names[-pool:]) if pool else set()
+        keep_recent |= set(keep)
+        removed: List[str] = []
+        for name in names:
+            if name in keep_recent:
+                continue
+            try:
+                generation = int(name[4:-3])
+            except ValueError:                              # pragma: no cover
+                continue
+            if is_milestone_generation(generation):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                os.remove(path)
+            except OSError as exc:                          # pragma: no cover
+                print(f"[learner] could not prune {name}: {exc}", flush=True)
+                continue
+            removed.append(path)
+        if removed:
+            print(f"[learner] checkpoint retention: deleted "
+                  f"{len(removed)} generation checkpoint(s) "
+                  f"({', '.join(os.path.basename(p) for p in removed[:8])}"
+                  f"{', ...' if len(removed) > 8 else ''}); keeping the last "
+                  f"{pool} plus milestones "
+                  f"{list(MILESTONE_GENERATIONS)} + every {MILESTONE_EVERY}",
+                  flush=True)
+        return removed
 
     def state_dict(self) -> Dict[str, Any]:
         return {

@@ -260,8 +260,13 @@ class ReplayBuffer:
                 out[which == bi] = blocks[bi][rows]
         return out
 
-    def batch(self, batch: int, value_blend: float = 0.0) -> Dict[str, np.ndarray]:
-        return make_batch(self.sample(batch), value_blend=value_blend)
+    def batch(self, batch: int, value_blend: float = 0.0,
+              obs_out: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
+        """One training batch.  ``obs_out`` is a caller-owned observation
+        buffer (the learner's prefetcher rotates over three of them) so a
+        4096x1094 float32 array is not reallocated on every step."""
+        return make_batch(self.sample(batch), value_blend=value_blend,
+                          obs_out=obs_out)
 
     # -- persistence -----------------------------------------------------
     def state_dict(self) -> Dict[str, Any]:

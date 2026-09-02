@@ -1,8 +1,10 @@
 # Production layout for one NSCC `ai`-queue node: 4x A100-40GB + 64 CPU cores
 # (docs/AI_DESIGN.md §0/§1.8, docs/research/judges.md "training_plan_4xA100").
 #
-#   GPU 0     learner, bf16 autocast, no DDP (a ~13M-parameter MLP is >15x
-#             oversupplied by one A100; the DDP branch exists for >40M nets)
+#   GPU 0     learner, bf16 autocast, single rank.  DDP is NOT wired (the
+#             orchestrator is single-rank; see learner.DDP_NOT_WIRED) and the
+#             learner refuses to start with WORLD_SIZE > 1.  A ~12.6M-parameter
+#             MLP is >15x oversupplied by one A100, so this is not a loss.
 #   GPU 1-3   three inference servers, batch <= 1024, coalescing window 1 ms
 #   CPU       56 actor processes x 24 concurrent games = 1,344 games in flight,
 #             leaving ~8 cores for the learner, the servers and the OS
@@ -52,11 +54,21 @@ selfplay:
   augment_rotations: 5
   mixed_game_frac: 0.25
   opponent_weights: {latest: 0.0, historical: 0.6, anchor: 0.4}
-  historical_pool_size: 16
-  historical_cache: 3
+  historical_pool_size: 16      # also the checkpoint retention floor
+  historical_cache: 3           # LRU of loaded historical nets, per actor
+  historical_pool_refresh_s: 60.0   # cache the pool listing this long
+  historical_reuse_prob: 0.85   # reuse an already-loaded opponent this often
   stats_every_s: 30.0
   weight_refresh_s: 60.0
+  progress_refresh_s: 30.0      # re-read progress.json (curriculum) this often
   ship_every_games: 4
+  # A wave is `games_per_actor` searches deep; the stop grace has to outlive
+  # one wave or `timeout --signal=INT` costs the run its last games.
+  stop_grace_s: 60.0
+  restart_budget: 8             # per actor, inside restart_window_s
+  restart_window_s: 900.0
+  restart_backoff_s: 2.0
+  restart_backoff_max_s: 120.0
   # Curriculum (§1.8): 2p-only at reduced search for the first 300k games,
   # then the five-mode mixture.
   mode_mixture: {ind2: 0.25, ind3: 0.15, ind4: 0.15, ovt: 0.20, team_adj: 0.15, team_opp: 0.10}
@@ -76,8 +88,17 @@ replay:
   window_start: 4
   window_end: 20
   window_ramp_generations: 40
-  max_samples: 20000000      # ~8 GB at 414 B/record
+  # RAM cap, NOT the window: whichever of the two is smaller decides what the
+  # learner actually samples from, so it has to be set above the window or the
+  # config is lying about the window (the trainer warns once when it bites and
+  # logs `window_retained` every generation).
+  # The full window is 20 generations x 20,000 games x ~75 augmented records
+  # per game ~= 30M records; at 414 B/record that is ~11.6 GiB.  40M gives it
+  # headroom to ~15.4 GiB, on a node with 440 GB.
+  max_samples: 40000000
   min_samples: 200000
+  checkpoint: true
+  checkpoint_async: true     # ~41 s at this size; the main loop is the learner
 
 learner:
   algorithm: az              # switch to `ppo` for the fallback learner
@@ -95,7 +116,9 @@ learner:
   bf16: true
   value_blend: 0.5           # 0.5*root Q + 0.5*outcome (judges.md)
   log_every: 50
-  ddp: true                  # only engages when WORLD_SIZE > 1
+  prefetch: true             # prepare the next batch while this step runs
+  ddp: false                 # DDP is NOT wired; WORLD_SIZE > 1 is refused
+  checkpoint_retention: true # prune gen_XXXX.pt (pool + milestones), ~125 GB
 
 inference:
   mode: server
@@ -114,8 +137,18 @@ eval:
   opponents: [random, greedy]
   search_bot: true
   async_process: true
+  # 0 = skip the ONE final evaluation when the run was stopped by a signal.
+  # The PBS chain stops a link with `timeout --signal=INT --kill-after=10m`:
+  # after the SIGINT this job has minutes, and a final evaluation here is 100
+  # paired games + 25 search games.  The checkpoint is what the next link
+  # needs.  Set a positive budget (seconds) to run it anyway, capped.
+  final_eval_seconds: 0.0
 
 games_per_generation: 20000
-max_seconds: 424800          # 118 h, inside a 120 h PBS wall clock
+# RUN-lifetime budget, restored from the checkpoint on every resume -- not a
+# per-link one (each link is bounded by the PBS walltime and TRAIN_TIMEOUT in
+# scripts/nscc_train.pbs).  118 h of self-play across the whole chain; raise it
+# with `--set max_seconds=...` to keep a chain going past that.
+max_seconds: 424800
 torch_threads: 1
 learner_threads: 8

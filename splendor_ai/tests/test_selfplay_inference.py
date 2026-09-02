@@ -189,6 +189,10 @@ def test_two_actors_through_one_server(tmp_path):
                                   for m in payloads if m.get("n")])
         S.check_records(records)
         assert set(np.unique(records["mode"]).tolist()) <= set(range(len(S.MODE_TAGS)))
+        # Provenance: in `server` mode the actor holds no model, so the weight
+        # generation has to come back on the response.  Every record used to be
+        # stamped 0 here, which made the replay window's provenance a lie.
+        assert set(np.unique(records["generation"]).tolist()) == {3}
     finally:
         stop.set()
         request_q.put(None)
@@ -197,3 +201,114 @@ def test_two_actors_through_one_server(tmp_path):
             if proc.is_alive():                             # pragma: no cover
                 proc.terminate()
                 proc.join(timeout=5)
+
+
+# ── torn reads vs. the version gate ───────────────────────────────────────
+
+def test_weight_watcher_retries_a_torn_read_but_not_the_version_gate(tmp_path):
+    """`except RuntimeError: raise` used to make the retry loop dead code.
+
+    ``torch.load`` raises ``RuntimeError`` for a truncated file *and*
+    ``load_checkpoint`` raises ``RuntimeError`` for an encoder mismatch, so the
+    exception type cannot tell "read it again in 50 ms" from "this build can
+    never read these weights".  The message can.
+    """
+    from splendor_ai.selfplay.inference import is_version_gate
+
+    cfg = NetConfig(width=32, blocks=1)
+    path = str(tmp_path / "latest.pt")
+    _publish(path, cfg, seed=1)
+    good = open(path, "rb").read()
+
+    live = SplendorNet(cfg)
+    watcher = WeightWatcher(path, live, min_interval_s=0.0)
+    watcher.retries = 4
+    watcher.retry_sleep_s = 0.0
+
+    # A truncated file is what a reader sees mid-write on a shared filesystem.
+    with open(path, "wb") as fh:
+        fh.write(good[:len(good) // 3])
+    with pytest.raises(Exception) as exc:                   # all retries fail
+        watcher.poll(force=True)
+    assert not is_version_gate(exc.value)
+
+    # ...and it succeeds as soon as the file is whole again, without the caller
+    # doing anything: the loop retries.
+    calls = {"n": 0}
+    real_load = torch.load
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("PytorchStreamReader failed reading zip archive")
+        return real_load(*args, **kwargs)
+
+    with open(path, "wb") as fh:
+        fh.write(good)
+    torch.load = flaky
+    try:
+        assert watcher.poll(force=True) is True
+    finally:
+        torch.load = real_load
+    assert calls["n"] == 3                                  # two retries, then ok
+
+    # The version gate is NOT retried: it is re-raised on the first attempt.
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload["obs_version"] = payload["obs_version"] + 99
+    torch.save(payload, path)
+    before = calls["n"]
+    calls["n"] = 0
+    with pytest.raises(RuntimeError) as gate:
+        watcher.poll(force=True)
+    assert is_version_gate(gate.value)
+    assert before >= 0
+
+
+def test_is_version_gate_only_matches_the_encoder_refusal():
+    from splendor_ai.selfplay.inference import is_version_gate
+
+    assert is_version_gate(RuntimeError("checkpoint has obs_version 3, ..."))
+    assert is_version_gate(RuntimeError("action_version mismatch"))
+    assert not is_version_gate(RuntimeError("PytorchStreamReader failed"))
+    assert not is_version_gate(EOFError("truncated"))
+
+
+# ── a restarted actor must not eat its predecessor's replies ──────────────
+
+def test_request_ids_start_in_a_block_of_their_own():
+    a = RemoteEvaluator.start_id_for(1)
+    b = RemoteEvaluator.start_id_for(2)
+    assert a != b and abs(a - b) >= RemoteEvaluator.ID_STRIDE
+    assert RemoteEvaluator.start_id_for(0) == 0
+
+
+def test_a_replacement_actor_skips_the_reply_meant_for_the_dead_one(tmp_path):
+    """Same response queue, new process: identical ids used to collide.
+
+    Both halves of the fix are exercised here: the replacement starts its ids
+    in its own block, and it *skips* anything that is not its own id rather
+    than accepting it as its answer.
+    """
+    cfg = NetConfig(width=32, blocks=1)
+    path = str(tmp_path / "latest.pt")
+    model = _publish(path, cfg, seed=4)
+
+    request_q = queue.Queue()
+    response_q = queue.Queue()
+    dead = RemoteEvaluator(0, request_q, response_q, timeout_s=5)
+    fresh = RemoteEvaluator(0, request_q, response_q, timeout_s=5,
+                            start_id=RemoteEvaluator.start_id_for(7))
+    assert fresh._req_id != dead._req_id
+
+    obs, mask = _random_inputs(3, seed=1)
+    priors, values = NetEvaluator(model, "cpu").evaluate(obs, mask)
+    # The dead actor's in-flight reply, still queued...
+    response_q.put((dead._req_id + 1, priors.tobytes(), values.tobytes(), 9))
+    # ...and then the real answer to the replacement's own request.
+    response_q.put((fresh._req_id + 1, priors.tobytes(), values.tobytes(), 11))
+
+    got_p, got_v = fresh.evaluate(obs, mask)
+    assert np.allclose(got_p, priors, atol=1e-6)
+    assert fresh.stale == 1                                 # the stale one, dropped
+    assert fresh.generation == 11                           # from ITS response
+    assert request_q.qsize() == 1

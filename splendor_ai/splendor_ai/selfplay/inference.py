@@ -271,6 +271,14 @@ class InferenceServer:
         #: group, so a server that exited immediately would strand every actor
         #: mid-search on `response_q.get`, and their finished games with them.
         self.stop_grace_s = float(stop_grace_s)
+        #: After a stop, how long the request queue has to stay EMPTY before
+        #: the server believes the actors are really done.  One empty 100 ms
+        #: `_gather` is not evidence: an actor spends tens of milliseconds
+        #: backing values up its trees between evaluator calls, so a single
+        #: gap would have retired the server in the middle of a wave and left
+        #: the actor blocked on `response_q.get` until its 120 s timeout --
+        #: losing exactly the games this grace period exists to save.
+        self.stop_idle_s = max(1.0, min(5.0, self.stop_grace_s / 5.0))
         #: set by the SIGINT/SIGTERM handler in :func:`server_main`
         self.signalled = False
         self.model = SplendorNet(net_cfg).to(device).eval()
@@ -316,23 +324,33 @@ class InferenceServer:
         # single server draining its queue).
         retiring = False
         deadline: Optional[float] = None
+        idle_since: Optional[float] = None
         while True:
             stopping = self.signalled or stop_event.is_set()
             if stopping and deadline is None:
                 deadline = time.perf_counter() + self.stop_grace_s
-                print(f"[{self.name}] stopping: serving in-flight requests for "
-                      f"up to {self.stop_grace_s:.0f}s", flush=True)
+                print(f"[{self.name}] stopping: serving in-flight requests "
+                      f"until the queue is quiet for {self.stop_idle_s:.0f}s "
+                      f"(at most {self.stop_grace_s:.0f}s)", flush=True)
             if deadline is not None and time.perf_counter() >= deadline:
+                print(f"[{self.name}] stop grace expired with requests still "
+                      f"arriving; exiting", flush=True)
                 break
             batch = self._gather(request_q, stop_event)
             if not batch:
-                # `_gather` blocks 100 ms on an empty queue, so an empty batch
-                # after a stop means every actor has stopped asking: the wave
-                # in flight finished and it is safe to go.
+                # `_gather` blocks 100 ms on an empty queue.  After a stop,
+                # leave once it has stayed empty for `stop_idle_s` -- long
+                # enough to mean "the actors have finished their wave", not
+                # "an actor is busy backing up its trees".
                 if retiring or deadline is not None:
-                    break
+                    now = time.perf_counter()
+                    idle_since = now if idle_since is None else idle_since
+                    if now - idle_since >= self.stop_idle_s:
+                        break
+                    continue
                 self.watcher.poll()
                 continue
+            idle_since = None
             if batch[-1] is None:
                 batch = batch[:-1]
                 retiring = True

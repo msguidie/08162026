@@ -8,7 +8,8 @@
 #     qsub -P <project> splendor_ai/scripts/nscc_eval.pbs        # latest weights
 #     qsub -P <project> -v CKPT=runs/nscc/checkpoints/gen_0040.pt \
 #          splendor_ai/scripts/nscc_eval.pbs                    # a milestone
-#     qsub -P <project> -v GAMES=400,SIMS=800,EXPORT=1 \
+#     qsub -P <project> -l walltime=11:59:00 \
+#          -v GAMES=120,ARENA_TIMEOUT=10h,EXPORT=1 \
 #          splendor_ai/scripts/nscc_eval.pbs
 # A short check on the queue (walltime is a #PBS directive and cannot read an
 # environment variable, so shorten it on the command line):
@@ -31,7 +32,7 @@
 #      ^ 1 GPU with its 16 cores / 124 GB share.  The 16 cores are the point:
 #        --workers below spends them on parallel games.
 
-#PBS -l walltime=11:59:00
+#PBS -l walltime=05:00:00
 #      ^ under half a day.  See the budget arithmetic in section 5.
 
 #PBS -N splendor-eval
@@ -53,8 +54,12 @@ REPO_ROOT="$PWD"
 
 RUN_DIR="${RUN_DIR:-runs/nscc}"
 CKPT="${CKPT:-${RUN_DIR}/weights/latest.pt}"     # what we are rating
-GAMES="${GAMES:-120}"                            # games per pairing per mode
-SIMS="${SIMS:-400}"                              # search budget for the net bot
+# Defaults are sized to FINISH inside the walltime above on 1 GPU + 16 cores
+# (see "budget arithmetic" in section 5).  Raising them without raising
+# `-l walltime=` is how this job used to get killed with nothing to show.
+GAMES="${GAMES:-48}"                             # games per pairing per mode
+SIMS="${SIMS:-320}"                              # search budget for the net bot
+ARENA_TIMEOUT="${ARENA_TIMEOUT:-4h}"             # self-imposed, < walltime
 MODES="${MODES:-ind2 ind3 ind4 ovt team}"
 WORKERS="${WORKERS:-16}"                         # = ncpus above
 SEED="${SEED:-20260902}"
@@ -93,6 +98,7 @@ echo "node       : $(hostname)"
 echo "checkpoint : ${CKPT}"
 echo "modes      : ${MODES}"
 echo "games/pair : ${GAMES}   workers: ${WORKERS}   net sims: ${SIMS}"
+echo "arena limit: ${ARENA_TIMEOUT} (walltime 05:00:00)"
 echo "report     : ${REPORT}"
 echo "started    : $(date -Is)"
 
@@ -142,27 +148,54 @@ BOTS="random greedy mcts40 mcts160 mcts640"
 BOTS="${BOTS} net=net:${CKPT} search=search:${CKPT}:${SIMS}"
 
 # --- 5. run the arena -------------------------------------------------------
-# Budget arithmetic before you raise --games: with 7 bots there are 21 pairings
-# per mode, 5 modes, and a game costs from milliseconds (random/greedy) to
-# ~1 min (mcts640 at 4p).  120 games per pairing is roughly 6-9 h on 16 cores.
+# BUDGET ARITHMETIC (read this before raising --games).  With 7 bots there are
+# 21 pairings per mode and 5 modes, and `--games N` is rounded up to whole seat
+# rotations, so the schedule is ~134 N games in total: 6,432 at N=48, 16,080 at
+# N=120.  A game costs from milliseconds (random vs greedy) to ~1 min (mcts640
+# at 4p); measured, the whole ladder runs at roughly 1,800-2,300 games/h on 16
+# cores with one GPU.  So:
+#
+#     N=48   ~6.4k games   ~3-3.6 h    <- the default, fits 05:00 walltime
+#     N=60   ~8.0k games   ~3.5-4.5 h  (raise walltime to 06:00)
+#     N=120  ~16k games    ~7-9 h      (raise walltime to 11:59)
+#
 # The judges' rule is >=400 paired games per pairing before any *promotion*
 # decision — do that with a trimmed --bots list (e.g. only the champion, the
 # challenger and mcts160), not with the whole ladder at once.
-echo "--- arena"
-python -m splendor_ai.arena \
-    --bots ${BOTS} \
-    --modes ${MODES} \
-    --games "${GAMES}" \
-    --workers "${WORKERS}" \
-    --seed "${SEED}" \
-    --bootstrap "${BOOTSTRAP}" \
-    --device "${DEVICE}" \
-    --anchor random \
-    --out "${REPORT}"
+#
+# The arena flushes every finished game into the JSON report as it goes
+# (`--partial-every`), so a job that runs out of walltime anyway still leaves a
+# readable, re-scorable file behind.  `timeout --signal=INT` below keeps that
+# from becoming a SIGKILL in the middle of a write.
+echo "--- arena (self-imposed limit ${ARENA_TIMEOUT})"
+REPORT_JSON="${REPORT%.md}.json"
+timeout --signal=INT --kill-after=2m "${ARENA_TIMEOUT}" \
+    python -m splendor_ai.arena \
+        --bots ${BOTS} \
+        --modes ${MODES} \
+        --games "${GAMES}" \
+        --workers "${WORKERS}" \
+        --seed "${SEED}" \
+        --bootstrap "${BOOTSTRAP}" \
+        --device "${DEVICE}" \
+        --anchor random \
+        --partial-every 60 \
+        --out "${REPORT}"
 STATUS=$?
 echo "--- arena exited with status ${STATUS}"
 
-REPORT_JSON="${REPORT%.md}.json"
+if [ "${STATUS}" -ne 0 ] && [ -f "${REPORT_JSON}" ]; then
+    echo "--- the arena did not finish, but ${REPORT_JSON} holds the games it"
+    echo "    did play (\"partial\": true, with a progress counter).  Score"
+    echo "    them with splendor_ai.arena's ArenaResults.from_dict, or re-run"
+    echo "    with a smaller GAMES= / a trimmed BOTS= list."
+    python - "${REPORT_JSON}" <<-'PY' || true
+	import json, sys
+	d = json.load(open(sys.argv[1]))
+	p = d.get("progress") or {}
+	print(f"    partial: {p.get('done')} / {p.get('total')} games")
+	PY
+fi
 if [ "${STATUS}" -eq 0 ] && [ -f "${REPORT}" ]; then
     echo "--- Elo table (also in ${REPORT})"
     # Print the ratings block of the markdown report into the job log, so the

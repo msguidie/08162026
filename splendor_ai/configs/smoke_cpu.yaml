@@ -104,6 +104,10 @@ eval:
   async_process: true
 
 games_per_generation: 600
-max_seconds: 1260            # ~21 minutes of self-play + a final evaluation
+# Run-lifetime budget (restored on --resume).  This config is a single run, so
+# it is also this job's budget: ~21 minutes of self-play, and because the stop
+# comes from the budget rather than from a signal, the final evaluation still
+# runs inline afterwards (see eval.final_eval_seconds).
+max_seconds: 1260
 torch_threads: 1
 learner_threads: 1

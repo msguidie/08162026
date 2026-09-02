@@ -170,16 +170,32 @@ nvidia-smi --query-gpu=index,name,memory.total,driver_version \
 echo "--- cores: $(nproc) visible"
 
 # --- 4. resume or start fresh ----------------------------------------------
-# The trainer's run directory is  runs/nscc/{weights/latest.pt,
-# checkpoints/gen_XXXX.pt, metrics.jsonl}.  If it already exists this link of
-# the chain continues it; otherwise this is generation 0.
+# The question is not "does the directory exist" — this very script created it
+# two steps ago (${LOG_DIR} and ${TORCHINDUCTOR_CACHE_DIR} both live inside it),
+# so that test was true even on the first link of a chain and every fresh run
+# was submitted with `--resume` against a directory holding no state.  It
+# happened to work (the trainer prints "no trainer_state.pt, starting fresh"),
+# but it hid a real failure: a run whose checkpoint went missing looked exactly
+# like a run that had never started.  The question is whether there is anything
+# to resume FROM, which is exactly one file.
+STATE_FILE="${RUN_DIR}/trainer_state.pt"
 RESUME_ARG=""
-if [ -d "${RUN_DIR}" ]; then
+if [ -f "${STATE_FILE}" ]; then
     RESUME_ARG="--resume ${RUN_DIR}"
-    echo "--- resuming ${RUN_DIR}"
+    echo "--- resuming ${RUN_DIR} ($(du -h "${STATE_FILE}" | cut -f1) state)"
     ls -1 "${RUN_DIR}/checkpoints" 2>/dev/null | tail -n 3 | sed 's/^/      /'
+elif [ -d "${RUN_DIR}/checkpoints" ] && \
+     [ -n "$(ls -A "${RUN_DIR}/checkpoints" 2>/dev/null)" ]; then
+    # Checkpoints but no trainer state: something removed or never wrote it.
+    # Starting fresh here would silently overwrite a real run, so stop instead.
+    echo "ERROR: ${RUN_DIR}/checkpoints has generation checkpoints but"        >&2
+    echo "       ${STATE_FILE} is missing, so this job cannot resume the run." >&2
+    echo "       Refusing to start a FRESH run on top of it.  Either restore"  >&2
+    echo "       the state file, or move ${RUN_DIR} aside, or pass a different">&2
+    echo "       RUN_DIR= to qsub."                                            >&2
+    exit 2
 else
-    echo "--- fresh run: ${RUN_DIR} does not exist yet"
+    echo "--- fresh run: no ${STATE_FILE}"
 fi
 
 if [ ! -f "${CONFIG}" ]; then
@@ -191,6 +207,21 @@ fi
 # `timeout --signal=INT` sends SIGINT (the same signal as Ctrl-C) a bit before
 # PBS's walltime, so the trainer can finish its step, flush metrics.jsonl and
 # write a checkpoint instead of being SIGKILLed mid-write.
+#
+# It signals the whole PROCESS GROUP, not just the trainer: every actor and
+# every inference server gets the SIGINT at the same moment.  That is the
+# behaviour this run wants, and all three now handle it explicitly —
+#   * actors set a flag, finish the wave of `games_per_actor` games in flight,
+#     ship its records and exit 0 (they used to die inside a search, losing
+#     every finished-but-unshipped game);
+#   * inference servers keep serving until their request queue goes quiet, for
+#     up to `selfplay.stop_grace_s`, so nobody is stranded on a reply;
+#   * the trainer drains the record queue, then writes weights and the
+#     checkpoint FIRST and skips the final evaluation (`eval.final_eval_seconds`
+#     defaults to 0 = skip on a signal).
+# `timeout --foreground` would signal only the trainer and leave the children
+# to be terminated by it; that loses the last wave, so it is deliberately NOT
+# used.  --kill-after=10m is the backstop if any of the above wedges.
 echo "--- starting training (self-imposed limit ${TRAIN_TIMEOUT})"
 START_TS=$(date +%s)
 # The trainer's flags are exactly: --config, --resume, --set, --evaluate,
@@ -222,7 +253,11 @@ ls -l "${RUN_DIR}/weights/latest.pt" 2>/dev/null || \
 # Exit codes: 0 = the trainer finished on its own, 124 = `timeout` stopped it
 # because the walltime was nearly up (the normal case for a long run).  Any
 # other code is a real failure and must not be re-submitted blindly — read the
-# log, fix it, and qsub again by hand.
+# log, fix it, and qsub again by hand.  In particular:
+#   2 = a bad configuration (a typo in --set, a missing config file)
+#   3 = the trainer stopped itself: an actor exceeded its restart budget, or an
+#       inference server died.  The checkpoint IS written; the traceback above
+#       the "[train] aborted:" line is the failure to fix.
 if [ -f "${STOP_FILE}" ]; then
     echo "=== STOP file present (${STOP_FILE}) — not re-submitting."
 elif [ "${MAX_CHAIN}" -le 0 ] || [ "${CHAIN}" -ge "${MAX_CHAIN}" ]; then

@@ -451,13 +451,41 @@ def _describe_factory(factory: Any) -> str:
     return type(factory).__name__
 
 
+def _write_partial(path: str, results: "ArenaResults", done: int,
+                   total: int) -> None:
+    """Dump the games finished so far (atomic rename).
+
+    A full ladder is hours of GPU time and the eval job has a walltime.  When
+    it runs out, everything played so far used to be lost -- the JSON was
+    written once, at the end.  This is the same structure
+    :meth:`ArenaResults.from_dict` reads, with ``partial: true`` and the
+    progress counters, so an interrupted job can still be scored (or resumed by
+    hand with a shorter ``--games``).
+    """
+    payload = results.to_dict(include_games=True)
+    payload["partial"] = done < total
+    payload["progress"] = {"done": int(done), "total": int(total)}
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=1, sort_keys=False, default=float)
+    os.replace(tmp, path)
+
+
 def run_matches(bots: Mapping[str, Any], modes: Sequence[Any],
                 games_per_pairing: int = 100, seed: int = 0, workers: int = 1,
                 max_plies: int = MAX_PLIES, mixed: bool = True,
                 max_mixed_tables: int = 4, progress: Any = None,
                 device: str = "cpu",
-                mp_context: str = "spawn") -> "ArenaResults":
+                mp_context: str = "spawn",
+                partial_json: Optional[str] = None,
+                partial_every_s: float = 60.0) -> "ArenaResults":
     """Play the whole schedule and return the raw results.
+
+    ``partial_json`` persists the finished games to that path every
+    ``partial_every_s`` seconds, so a job killed by its walltime keeps what it
+    played.
 
     ``bots`` maps a report name to a **factory** (``() -> Bot``) — a bot is
     built inside the worker that will use it, because a torch module is
@@ -481,6 +509,34 @@ def run_matches(bots: Mapping[str, Any], modes: Sequence[Any],
     started = time.time()
     records: List[Optional[Dict[str, Any]]] = [None] * len(jobs)
     done = 0
+    last_flush = started
+
+    def partial_config() -> Dict[str, Any]:
+        return {
+            "bots": {name: _describe_factory(f) for name, f in factories.items()},
+            "modes": [m.to_dict() for m in mode_specs],
+            "games_per_pairing": int(games_per_pairing),
+            "seed": int(seed), "workers": int(workers),
+            "max_plies": int(max_plies), "mixed": bool(mixed),
+            "max_mixed_tables": int(max_mixed_tables),
+            "scheduled_games": len(jobs),
+            "started": started, "elapsed": time.time() - started,
+        }
+
+    def flush(force: bool = False) -> None:
+        nonlocal last_flush
+        if not partial_json:
+            return
+        now = time.time()
+        if not force and now - last_flush < partial_every_s:
+            return
+        last_flush = now
+        finished = [r for r in records if r is not None]
+        _write_partial(partial_json,
+                       ArenaResults(bots=names, modes=mode_specs,
+                                    games=finished, tables=tables,
+                                    config=partial_config()),
+                       len(finished), len(jobs))
 
     def note(record: Dict[str, Any]) -> None:
         nonlocal done
@@ -488,6 +544,7 @@ def run_matches(bots: Mapping[str, Any], modes: Sequence[Any],
         done += 1
         if progress is not None:
             progress(done, len(jobs), record)
+        flush()
 
     if workers and workers > 1 and len(jobs) > 1:
         import multiprocessing as mp
@@ -515,6 +572,7 @@ def run_matches(bots: Mapping[str, Any], modes: Sequence[Any],
         for job in jobs:
             note(_play_job(job))
 
+    flush(force=True)
     games = [r for r in records if r is not None]
     if len(games) != len(jobs):                            # pragma: no cover
         raise RuntimeError(f"{len(jobs) - len(games)} games did not come back")
@@ -1346,6 +1404,11 @@ bot specs: random | greedy | mcts<N> | net:<ckpt>[:c5] |
     parser.add_argument("--out", default="reports/arena.md",
                         help="markdown report path (JSON goes beside it)")
     parser.add_argument("--json", default=None, help="explicit JSON path")
+    parser.add_argument("--partial-every", type=float, default=60.0,
+                        metavar="SECONDS",
+                        help="flush finished games to the JSON this often "
+                             "(0 = only at the end); a walltime-killed job "
+                             "keeps what it played")
     parser.add_argument("--no-games", action="store_true",
                         help="omit per-game records from the JSON")
     parser.add_argument("--quiet", action="store_true")
@@ -1376,16 +1439,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"arena: {len(factories)} bots × {len(modes)} modes, "
               f"{args.games} games/pairing, workers={args.workers}",
               file=sys.stderr)
+    # Resolve the JSON path up front so finished games can be flushed to it as
+    # they complete: a long ladder outlives its walltime more often than not.
+    out_json = args.json
+    if out_json is None:
+        stem = args.out[:-3] if args.out.endswith(".md") else args.out
+        out_json = stem + ".json"
     results = run_matches(factories, modes, games_per_pairing=args.games,
                           seed=args.seed, workers=args.workers,
                           max_plies=args.max_plies, mixed=not args.no_mixed,
                           max_mixed_tables=args.max_mixed_tables,
-                          progress=None if args.quiet else progress)
+                          progress=None if args.quiet else progress,
+                          partial_json=out_json,
+                          partial_every_s=args.partial_every)
     if not args.quiet:
         print("", file=sys.stderr)
     # Resolve the anchor once so the report and this summary agree.
     anchor = resolve_anchor(results.bots, args.anchor)
-    md, js = write_reports(results, args.out, args.json, anchor=anchor,
+    md, js = write_reports(results, args.out, out_json, anchor=anchor,
                            bootstrap=args.bootstrap, seed=args.seed,
                            include_games=not args.no_games)
     ratings = fit_bradley_terry(results, anchor=anchor,

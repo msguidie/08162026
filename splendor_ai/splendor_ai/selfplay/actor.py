@@ -388,12 +388,22 @@ class Actor:
 
         try:
             model, _ckpt = load_checkpoint(path, map_location="cpu")
-        except (OSError, RuntimeError, EOFError) as exc:
+        except Exception as exc:
+            # Every failure mode, on purpose.  A checkpoint half-written by the
+            # learner raises UnpicklingError, a pruned one OSError, a truncated
+            # one RuntimeError, one from another encoder RuntimeError again --
+            # and not one of them is a reason to kill an actor and its games
+            # over the choice of an OPPONENT.  (The encoder gate that does
+            # matter is on weights/latest.pt, where WeightWatcher enforces it.)
             if path not in self._pool_failed:
+                from .inference import is_version_gate
+
+                extra = (" -- the opponent pool is from another encoder"
+                         if is_version_gate(exc) else "")
                 print(f"[actor {self.actor_id}] historical opponent "
                       f"{os.path.basename(path)} unavailable "
-                      f"({type(exc).__name__}: {exc}); dropping it from the "
-                      f"pool", flush=True)
+                      f"({type(exc).__name__}: {exc}){extra}; dropping it from "
+                      f"the pool", flush=True)
             self._pool_failed.add(path)
             self._pool_cache = [p for p in self._pool_cache if p != path]
             return None

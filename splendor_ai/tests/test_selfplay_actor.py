@@ -1,5 +1,7 @@
 """The actor: PCR, recording, seat conventions, stuck/truncation, mixing."""
 
+import json
+import os
 import queue
 import random
 
@@ -128,3 +130,188 @@ def test_actor_reports_throughput_and_diagnostics(tmp_path):
         assert key in last
     assert last["sims_per_s"] > 0
     assert 0.0 <= last["disagreement"] <= 1.0
+
+
+# ── the curriculum is a function of RUN-GLOBAL progress ───────────────────
+
+def _phased_cfg(tmp_path, **overrides):
+    """A config whose phase 0 is 2p and whose phase 1 is 4p."""
+    from splendor_ai.selfplay.config import PhaseConfig
+
+    cfg = _cfg(tmp_path, **overrides)
+    cfg.selfplay.phases = [
+        PhaseConfig(until_games=1000, mixture={"ind2": 1.0}, sims_full=4),
+        PhaseConfig(until_games=None, mixture={"ind4": 1.0}, sims_full=6),
+    ]
+    return cfg
+
+
+def _fresh_actor(cfg, instance=0, games_offset=0, actor_id=0):
+    return Actor(cfg, actor_id, queue.Queue(), queue.Queue(),
+                 instance=instance, games_offset=games_offset)
+
+
+def test_curriculum_phase_comes_from_run_global_games_not_the_actors_own(tmp_path):
+    """A resumed actor used to restart the whole curriculum at phase 0.
+
+    Its own counter starts at 0 every time the process is spawned, so deriving
+    the phase from it put the node back in the warm-up phase on every link of
+    the PBS chain and after every actor restart.
+    """
+    cfg = _phased_cfg(tmp_path)
+
+    # A fresh run: no progress file, no offset -> phase 0.
+    actor = _fresh_actor(cfg)
+    assert actor.global_games() == 0
+    assert actor._phase().mixture == {"ind2": 1.0}
+    assert actor._sample_mode() == "ind2"
+
+    # The trainer hands a restored count at spawn: phase 1 straight away.
+    resumed = _fresh_actor(cfg, games_offset=50_000)
+    assert resumed._phase().mixture == {"ind4": 1.0}
+    assert resumed._sample_mode() == "ind4"
+    assert resumed._search_cfg(full=True).sims == 6
+
+    # ...and a running actor picks the boundary up from progress.json.
+    with open(cfg.progress_path, "w") as fh:
+        json.dump({"games_done": 4_000, "generation": 7, "instance": 3}, fh)
+    assert actor._sync_progress(force=True) is True
+    assert actor.global_games() >= 4_000
+    assert actor._phase().mixture == {"ind4": 1.0}
+
+
+def test_progress_is_never_read_backwards_or_fatal(tmp_path):
+    cfg = _phased_cfg(tmp_path)
+    actor = _fresh_actor(cfg, games_offset=9_000)
+    # A stale progress.json (it is written on a timer) must not rewind us.
+    with open(cfg.progress_path, "w") as fh:
+        json.dump({"games_done": 12}, fh)
+    actor._sync_progress(force=True)
+    assert actor.global_games() >= 9_000
+    # A half-written / empty file is not worth crashing an actor over.
+    open(cfg.progress_path, "w").close()
+    assert actor._sync_progress(force=True) is False
+    assert actor.global_games() >= 9_000
+
+
+# ── per-launch nonce: no replayed deals, no colliding game ids ────────────
+
+def test_the_instance_nonce_changes_the_deals_and_the_game_ids(tmp_path):
+    """Two launches of the same run must not play the same games again."""
+    cfg = _cfg(tmp_path)
+
+    def deal(instance):
+        actor = _fresh_actor(cfg, instance=instance)
+        for slot in actor.slots:
+            actor._start_game(slot)
+        return ([s.game_id for s in actor.slots],
+                [bytes(s.state.to_bytes()) for s in actor.slots])
+
+    ids_a, states_a = deal(1)
+    ids_b, states_b = deal(2)
+    assert len(set(ids_a)) == len(ids_a)                    # unique in a launch
+    assert not (set(ids_a) & set(ids_b))                    # ...and across them
+    assert states_a != states_b                             # different deals
+    assert all(i > 0 for i in ids_a + ids_b)                # positive int64
+
+    # Same instance, different actors: still disjoint ids.
+    other_seat = _fresh_actor(cfg, instance=1, actor_id=3)
+    for slot in other_seat.slots:
+        other_seat._start_game(slot)
+    assert not (set(ids_a) & {s.game_id for s in other_seat.slots})
+
+
+def test_game_id_layout_packs_instance_actor_and_index():
+    from splendor_ai.selfplay.actor import make_game_id
+
+    assert make_game_id(0, 0, 0) == 0
+    assert make_game_id(0, 0, 7) == 7
+    assert make_game_id(0, 1, 0) == 1 << 32
+    assert make_game_id(1, 0, 0) == 1 << 42
+    assert make_game_id(2 ** 20 - 1, 2 ** 10 - 1, 2 ** 32 - 1) < 2 ** 63
+
+
+# ── historical opponents: cached listing, LRU of loaded nets ──────────────
+
+def _write_pool(cfg, generations):
+    from splendor_ai.model import SplendorNet, save_checkpoint
+
+    paths = []
+    for gen in generations:
+        path = os.path.join(cfg.checkpoints_dir, f"gen_{gen:04d}.pt")
+        save_checkpoint(path, SplendorNet(cfg.net), {"step": gen,
+                                                     "generation": gen})
+        paths.append(path)
+    return paths
+
+
+def test_pool_listing_is_cached_and_loaded_nets_are_an_lru(tmp_path):
+    cfg = _cfg(tmp_path, **{"selfplay.historical_pool_size": 4,
+                            "selfplay.historical_cache": 2,
+                            "selfplay.historical_pool_refresh_s": 3600.0})
+    paths = _write_pool(cfg, range(4))
+    actor = _fresh_actor(cfg)
+
+    assert actor._historical_pool() == paths
+    # Cached: a checkpoint pruned by the learner after the listing does not
+    # change what this actor sees until the cache expires (it falls back to the
+    # anchor if the load then fails, rather than dying).
+    os.remove(paths[0])
+    assert actor._historical_pool() == paths
+    actor._pool_cache_t = -1e18                             # expire it
+    assert actor._historical_pool() == paths[1:]
+
+    # LRU over loaded nets, capped at historical_cache.
+    a, b, c = paths[1], paths[2], paths[3]
+    assert actor._historical_evaluator(a) is not None
+    assert actor._historical_evaluator(b) is not None
+    assert actor.historical_loads == 2
+    actor._historical_evaluator(a)                          # touch a
+    assert actor.historical_loads == 2                      # served from cache
+    actor._historical_evaluator(c)                          # evicts b, not a
+    assert set(actor._historical) == {a, c}
+    assert actor.historical_loads == 3
+
+
+def test_an_unreadable_checkpoint_drops_out_of_the_pool(tmp_path):
+    cfg = _cfg(tmp_path, **{"selfplay.historical_pool_size": 4,
+                            "selfplay.historical_cache": 2})
+    paths = _write_pool(cfg, range(2))
+    actor = _fresh_actor(cfg)
+    actor._historical_pool()
+    with open(paths[0], "wb") as fh:                        # truncate it
+        fh.write(b"not a checkpoint")
+    assert actor._historical_evaluator(paths[0]) is None
+    assert paths[0] in actor._pool_failed
+    assert paths[0] not in actor._pool_cache
+    # ...and a seat that drew it falls back rather than killing the actor.
+    assert actor._evaluator_for(paths[0]) is actor.evaluator
+
+
+def test_historical_reuse_prefers_an_already_loaded_checkpoint(tmp_path):
+    cfg = _cfg(tmp_path, **{"selfplay.historical_pool_size": 8,
+                            "selfplay.historical_cache": 2,
+                            "selfplay.historical_reuse_prob": 1.0})
+    paths = _write_pool(cfg, range(8))
+    actor = _fresh_actor(cfg)
+    first = actor._pick_historical(actor._historical_pool())
+    assert first in paths
+    loads = actor.historical_loads
+    for _ in range(10):
+        assert actor._pick_historical(actor._historical_pool()) == first
+    assert actor.historical_loads == loads                  # no reloading
+
+
+# ── per-mode instrumentation the trainer aggregates (§1.8) ────────────────
+
+def test_actor_counts_games_and_truncations_per_mode(tmp_path):
+    cfg = _cfg(tmp_path, **{"selfplay.max_plies": 12})      # force truncations
+    actor, _records, _payloads = _run(cfg, waves=40)
+    assert sum(actor.mode_games.values()) == actor.games_finished
+    assert set(actor.mode_games) <= set(actor.mode_plies)
+    assert sum(actor.mode_truncations.values()) == actor.truncations
+    actor._maybe_stats(force=True)
+    msg = actor.stats_queue.get_nowait()
+    assert msg["mode_games"] == actor.mode_games
+    assert msg["mode_truncations"] == actor.mode_truncations
+    assert msg["global_games"] == actor.global_games()

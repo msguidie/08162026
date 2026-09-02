@@ -114,3 +114,22 @@ def test_train_py_selects_the_ppo_learner(tmp_path):
     trainer = Trainer(cfg)
     assert isinstance(trainer.learner, PPOLearner)
     trainer.metrics.close()
+
+
+def test_ppo_is_refused_without_an_explicit_acknowledgement(tmp_path):
+    """`algorithm: ppo` used to start and quietly train on AlphaZero targets."""
+    from splendor_ai.selfplay.config import PPO_NOT_READY
+
+    with pytest.raises(ValueError) as exc:
+        load_config(None, [f"run_dir={tmp_path}/run", "learner.algorithm=ppo"])
+    message = str(exc.value)
+    assert message == PPO_NOT_READY
+    # the message has to say what is missing, not just "no"
+    for fragment in ("search-free", "log_prob", "ratio", "rollout",
+                     "ppo_experimental"):
+        assert fragment in message
+
+    # ...and the acknowledgement is all it takes to run the diagnostic.
+    cfg = load_config(None, [f"run_dir={tmp_path}/run", "learner.algorithm=ppo",
+                             "learner.ppo_experimental=true"])
+    assert cfg.learner.algorithm == "ppo"

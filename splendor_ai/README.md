@@ -765,9 +765,54 @@ no error message anywhere.
 | `metrics.jsonl` | one JSON object per line: `run`, `learner`, `progress`, `generation`, `eval`, `actor_restart`, `checkpoint`, `summary` |
 | `weights/latest.pt` | the published net; actors and inference servers poll it |
 | `checkpoints/gen_XXXX.pt` | one per generation — opponent pool, arena history |
-| `trainer_state.pt` | model + optimizer + counters + RNG (resume) |
-| `replay.npz` | the replay buffer (resume) |
+| `trainer_state.pt` | model + optimizer + counters + RNG + `run_instance` (resume) |
+| `replay.npz` | the replay buffer (resume; saved on a background thread) |
+| `progress.json` | run-global `games_done`/`generation`/`step`/`instance`, rewritten every few seconds — this is what actors read their **curriculum phase** from |
 | `tb/` | TensorBoard mirror, when `tensorboard` is importable |
+
+### Stopping, resuming, and what survives
+
+The production run is a chain of PBS jobs (`scripts/nscc_train.pbs`): each link
+runs under `timeout --signal=INT --kill-after=10m`, resumes the previous one's
+checkpoint, and submits its successor. Everything below follows from that.
+
+* **A signal means "checkpoint now".** `timeout --signal=INT` signals the whole
+  process group. Actors set a flag, finish the wave of `games_per_actor` games
+  in flight, ship its records and exit 0; inference servers keep serving until
+  their queue goes quiet (`selfplay.stop_grace_s`); the trainer drains the
+  record queue, then **publishes the weights and writes the checkpoint before
+  anything optional**. Nothing that can be skipped runs before the checkpoint,
+  because after the SIGINT the job is minutes away from a SIGKILL.
+* **The final evaluation is skipped on a signal** (`eval.final_eval_seconds: 0`,
+  the default). It used to run *first* — a 20-minute evaluation, on a job with
+  10 minutes left, ahead of the only thing the next link needs. Set
+  `eval.final_eval_seconds` to a positive budget to run it anyway; it then runs
+  in a child process and is killed at that budget. A run that stops on its own
+  (`max_games`, `max_seconds`, the smoke script) still evaluates inline.
+* **Every launch gets a fresh nonce.** `run_instance` is persisted in
+  `trainer_state.pt` and incremented on every resume. Actors mix it (with their
+  pid and a spawn counter) into their RNG seeds, their game ids and their
+  inference request ids. Without it a resumed run dealt the same games in the
+  same order under game ids that collided with the records already in the
+  buffer, and a restarted actor could consume a reply meant for its dead
+  predecessor.
+* **The curriculum is run-global.** Phase boundaries are counted in
+  `progress.json`'s `games_done`, not in an actor's own counter — that counter
+  starts at 0 on every resume and every actor restart, which used to put the
+  whole node back in phase 0 (2p at reduced simulations) after each link.
+* **`max_seconds` is a RUN budget, not a per-link one.** The elapsed time is
+  restored from the checkpoint, so a chain stops when the whole run has spent
+  it. Per-link limits are the PBS walltime and `TRAIN_TIMEOUT`. Resuming a run
+  that has already spent its budget prints a line saying exactly that; raise it
+  with `--set max_seconds=...`.
+* **Old generation checkpoints are pruned** (`learner.checkpoint_retention`).
+  Kept: the last `selfplay.historical_pool_size` generations (the live opponent
+  pool) plus milestones 5, 10, 20, 40, 80 and every 40th after that. A 120 h
+  chain writes ~1,000 × ~150 MB otherwise. Deletions are logged.
+* **The replay buffer is saved on a background thread** with an atomic rename
+  (`replay.checkpoint_async`). If the process dies mid-save the previous
+  `replay.npz` is still there and still valid — the run resumes with a slightly
+  older buffer, never a truncated one. The final checkpoint saves synchronously.
 
 ### Metrics, and what they mean
 
@@ -781,9 +826,11 @@ no error message anywhere.
 | `policy_top1_agreement` | how often the net's argmax matches the search's. Rises from ~1/num_legal towards ~0.7. |
 | `disagreement` (actor) | the same quantity measured *online* at the root, i.e. how much search is still adding. It should fall, and it should never reach 0. |
 | `stuck_rate`, `truncation_rate` | deadlocked seats (resigned, §1.2) and games cut at `max_plies`. Truncations are labelled and their value target carries weight 0.3; a rising truncation rate in 3p/4p is a real signal, not noise. |
-| `mode_plies` | mean game length per mode; the curriculum's sanity check. |
+| `mode_plies`, `mode_games`, `mode_truncations`, `mode_truncation_rate` | per mode: mean game length, games played, games cut at `max_plies`. `mode_games` is the curriculum's only observable output — if a phase boundary passes and the mix does not change, the actors are not seeing `progress.json`. Counts are per actor *process*, so they reset when an actor restarts. |
+| `window`, `window_retained` | generations the ramp asks for vs. generations actually held. They differ only when `replay.max_samples` is truncating the window, which is also warned about once, loudly. |
+| `sims_per_s` … vs `lifetime_*_per_s` | the first group is **this launch** (counters minus their value at restore, over this process's elapsed time); the `lifetime_` group is the whole run, over its cumulative elapsed time. On a resumed run only the second group is comparable across links. |
 | `net_vs_random`, `net_vs_greedy`, `search_vs_greedy` | paired seat-swapped win rates against the fixed anchors. Paired = both games of a pair use the same deck seed, so only the seating differs. |
-| `actor_restarts` | an actor died and was restarted. Non-zero deserves a look at its traceback in the job log; actors log and re-raise, never swallow. |
+| `actor_restarts` | an actor died and was restarted. Non-zero deserves a look at its traceback in the job log; actors log and re-raise, never swallow. Restarts back off exponentially (`selfplay.restart_backoff_s`), and more than `selfplay.restart_budget` deaths of one actor inside `selfplay.restart_window_s` aborts the run rather than looping on a crash for ever. |
 
 ### Go / no-go gates (`docs/AI_DESIGN.md` §2)
 
@@ -870,18 +917,26 @@ encoder, network, replay format and arena, different target producer.
 
 ```yaml
 learner:
-  algorithm: ppo        # or: --set learner.algorithm=ppo
+  algorithm: ppo
+  ppo_experimental: true    # required; the config refuses `ppo` without it
 ```
 
 `train.py` then constructs `selfplay/ppo_learner.py::PPOLearner` instead of the
 AlphaZero learner; it exposes the same `ready / train_step / publish /
-save_generation / state_dict / load_state_dict` surface, so nothing else in the
-orchestrator changes. **This path is partially implemented**: the clipped
-surrogate, additive `-1e9` masking, GAE over per-seat decision points and
-margin-scaled terminal rewards are written and unit-tested, but the search-free
-actor branch that would feed it (sample the move from the masked policy, record
-every move with its `log_prob`) is a documented TODO at the top of that module.
-Do not switch it on for a production run without finishing that list.
+save_generation / state_dict / load_state_dict / warm_start` surface, so nothing
+else in the orchestrator changes.
+
+**This path is unfinished, and the config now refuses to start without an
+explicit acknowledgement** (`learner.ppo_experimental: true`; the error lists
+what is missing — `config.PPO_NOT_READY`). The clipped surrogate, additive
+`-1e9` masking, GAE over per-seat decision points and margin-scaled terminal
+rewards are written and unit-tested. What is missing is the half that makes it
+PPO: the actors still run MCTS and write AlphaZero targets, so the "action" the
+learner updates towards is the argmax of a search visit distribution, `logp_old`
+is recomputed from the *current* weights (the importance ratio is identically 1
+on the first epoch, and the clipping does nothing), the replay buffer is a
+generational window rather than an on-policy rollout, and records carry no
+`logp`/`value` columns. Treat it as a diagnostic, never a production run.
 
 ### Tuning knobs that actually matter
 
@@ -923,12 +978,29 @@ doc originally called for — the queue was chosen because a shm ring has to be
 reclaimed correctly when an actor dies mid-request, and a dying actor is a
 routine, restarted event here.
 
-### DDP
+### DDP — not wired, and the learner says so
 
-The learner is DDP-ready but DDP is **off** by default and untested here: with
-`WORLD_SIZE > 1` the model is wrapped in `DistributedDataParallel` and each
-rank draws `batch // world_size` samples so the effective batch is unchanged
-(`learner.local_batch`). For a ~13M-parameter MLP one A100 is already >15×
-oversupplied — judges.md argues DDP would add NCCL init, sharded checkpointing
-and silent-hang failure modes for zero throughput. Revisit above ~100M
-parameters.
+**DDP is not implemented.** `Learner.__init__` refuses to start when
+`WORLD_SIZE > 1` and prints what would have to be built first
+(`learner.DDP_NOT_WIRED`); `learner.ddp` is a reserved flag that engages
+nothing. The earlier wording here ("DDP-ready, off by default") described the
+one piece that did exist — a `DistributedDataParallel` wrapper around the model
+— and ignored the orchestrator around it, which is single-rank in a way that
+`torchrun` would not survive: every rank would spawn its own 56 actors, its own
+inference servers and its own eval process on the same node, every rank would
+publish over the others' `weights/latest.pt`, and every rank would keep a
+separate replay buffer and `trainer_state.pt`. That is not "untested", it is N
+uncoordinated runs sharing a directory.
+
+Wiring it would need, in order: (1) the learner device from `LOCAL_RANK`,
+(2) actor/server/eval spawning and every write to `run_dir` gated on rank 0,
+(3) a rank-0-only or sharded checkpoint, (4) the replay buffer fed on rank 0
+and the batch scattered. None of it is on the critical path: a ~12.6M-parameter
+MLP is >15× oversupplied by one A100 (judges.md), and the throughput ceiling on
+this node is CPU actors and queue transport, not learner FLOPs. **Run one rank
+per node.**
+
+(`docs/AI_DESIGN.md` §0 still describes the learner as "DDP-ready
+(`WORLD_SIZE>1` branch)", which was true of the wrapper and never true of the
+orchestrator. This section is the accurate one; the design doc needs the same
+correction.)

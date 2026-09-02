@@ -131,3 +131,92 @@ def test_sampling_covers_every_generation():
 def test_empty_buffer_raises():
     with pytest.raises(ValueError):
         ReplayBuffer().sample(4)
+
+
+def test_window_truncation_by_max_samples_is_visible():
+    """`max_samples` silently choosing the window is the bug; it must show."""
+    records, _z, _n = _game_records(n_records=10)
+    block = np.array(records, dtype=S.RECORD_DTYPE)
+    buf = ReplayBuffer(window_start=8, window_end=8, max_samples=10 ** 6)
+    for _ in range(6):
+        buf.add(block)
+        buf.close_generation()
+    assert buf.retained_generations() == 6                  # window not reached
+    assert not buf.window_truncated()
+    assert buf.cap_drops == 0
+
+    tight = ReplayBuffer(window_start=8, window_end=8, max_samples=25)
+    for _ in range(6):
+        tight.add(block)
+        tight.close_generation()
+    # The config asks for 8 generations; the cap is handing back far fewer.
+    assert tight.window_truncated()
+    assert tight.retained_generations() < tight.window_size()
+    assert tight.cap_drops > 0 and tight.cap_dropped_samples > 0
+
+
+def test_background_save_round_trips_and_never_leaves_a_partial_file(tmp_path):
+    records, _z, _n = _game_records(n_records=8)
+    block = np.array(records, dtype=S.RECORD_DTYPE)
+    buf = ReplayBuffer(window_start=4, window_end=4)
+    for _ in range(3):
+        buf.add(block)
+        buf.close_generation()
+    buf.add(block)                                          # an open generation
+    path = str(tmp_path / "replay.npz")
+
+    assert buf.save_async(path) is True
+    # The run keeps producing while the writer works; nothing here may corrupt
+    # the snapshot it took (blocks are never mutated in place).
+    buf.add(block)
+    assert buf.join_save(timeout=60.0)
+    assert not buf.saving()
+    assert not [p for p in tmp_path.iterdir() if ".tmp" in p.name]
+
+    other = ReplayBuffer(window_start=4, window_end=4).load(path)
+    assert other.retained_generations() == 3
+    assert len(other) == 4 * len(block)                     # 3 sealed + 1 open
+    assert other._pending_n == len(block)
+    drawn = other.batch(16)
+    assert drawn["obs"].shape[0] == 16
+
+
+def test_saving_per_generation_reads_back_the_same_records(tmp_path):
+    """The layout changed (one array per generation, no big concatenate)."""
+    blocks = [np.array(_game_records(seed=i, n_records=5)[0],
+                       dtype=S.RECORD_DTYPE) for i in range(3)]
+    buf = ReplayBuffer(window_start=3, window_end=3)
+    for block in blocks:
+        buf.add(block)
+        buf.close_generation()
+    path = str(tmp_path / "replay.npz")
+    buf.save(path)
+    back = ReplayBuffer(window_start=3, window_end=3).load(path)
+    assert [gen for gen, _b in back.generations] == [0, 1, 2]
+    for (_gen, got), want in zip(back.generations, blocks):
+        assert np.array_equal(got["state"], want["state"])
+        assert np.array_equal(got["policy_prob"], want["policy_prob"])
+
+
+def test_batch_prefetcher_prepares_batches_off_the_main_thread():
+    from splendor_ai.selfplay.learner import BatchPrefetcher
+
+    records, _z, _n = _game_records(n_records=12)
+    buf = ReplayBuffer(window_start=2, window_end=2)
+    buf.add(np.array(records, dtype=S.RECORD_DTYPE))
+    buf.close_generation()
+
+    pre = BatchPrefetcher(lambda out: buf.batch(8, obs_out=out),
+                          lambda: True, 8, OBS_DIM, poll_s=0.01)
+    try:
+        first = pre.get(timeout=30.0)
+        second = pre.get(timeout=30.0)
+        assert first is not None and second is not None
+        for batch in (first, second):
+            assert batch["obs"].shape == (8, OBS_DIM)
+            assert batch["mask"].any(axis=1).all()
+        # Three rotating buffers: consecutive batches never share storage, so
+        # the learner cannot be reading the array the producer is filling.
+        assert first["obs"] is not second["obs"]
+    finally:
+        pre.close()
