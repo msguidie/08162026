@@ -10,13 +10,13 @@ cap) inside ``select_leaf`` need no evaluation and simply do not join the batch.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
 from ..rules.engine import GameState
-from .mcts import MCTS, Leaf, SearchConfig, SearchResult
+from .mcts import MCTS, SearchResult
 
 __all__ = ["SearchSlot", "Scheduler"]
 

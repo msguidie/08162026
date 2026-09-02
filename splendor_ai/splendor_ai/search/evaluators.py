@@ -7,8 +7,9 @@
     #  mask  : bool[B, 65] legal-action masks
     #  priors: float32[B, 65]  (masked + renormalised again by the tree)
     #  values: float32[B, 4]   RELATIVE TO THE LEAF'S ACTING SEAT
-    #          index j is absolute seat (j + leaf_seat) % 4, so index 0 is
-    #          always the seat to move at that leaf.
+    #          index j is absolute seat (j + leaf_seat) % n, so index 0 is
+    #          always the seat to move at that leaf and entries >= n stay 0
+    #          (``splendor_ai.values.seat_relative(z, seat, n)``).
 
 ``obs`` is whatever the caller's ``encode_fn`` produces.  Numeric encoders
 (``splendor_ai/encode.py`` later, :class:`ZeroEncoder` in tests) yield
@@ -26,8 +27,7 @@ import numpy as np
 from ..rules import engine as E
 from ..rules.actions import (
     BUY_BOARD_START, BUY_RESERVED_START, CHOOSE_TILE_START, MAX_BOARD_SLOTS,
-    NUM_ACTIONS, NUM_TAKE_ACTIONS, RESERVE_BOARD_START, RESERVE_DECK_START,
-    TAKE_PATTERNS,
+    NUM_ACTIONS, NUM_TAKE_ACTIONS, RESERVE_BOARD_START, TAKE_PATTERNS,
 )
 from ..rules.cards import CARD_COST, CARD_COST_NZ, CARD_POINTS
 from .mcts import seat_relative, standings_values, terminal_values
@@ -35,6 +35,7 @@ from .mcts import seat_relative, standings_values, terminal_values
 __all__ = [
     "Evaluator", "UniformEvaluator", "RolloutEvaluator", "GreedyValueEvaluator",
     "ZeroEncoder", "state_encoder", "LeafRef", "greedy_action", "rollout_values",
+    "UniformRolloutEvaluator",
 ]
 
 _COST_SUM: Tuple[int, ...] = tuple(sum(c) for c in CARD_COST)
@@ -140,17 +141,15 @@ def greedy_action(state: E.GameState, mask: Optional[Sequence[bool]] = None
 
     # 3. Take gems.  Target = the attractive card closest to affordable.
     if any(mask[a] for a in range(NUM_TAKE_ACTIONS)):
-        need = [0, 0, 0, 0, 0]
         want = [0, 0, 0, 0, 0]          # how many cards want each colour
-        target_need = None
+        target_need = [0, 0, 0, 0, 0]
         target_key = None
         gold = player.gems[5]
         tmp = [0, 0, 0, 0, 0]
-        candidates = [(cid, True) for cid in reserved]
+        candidates = list(reserved)
         for t in range(3):
-            for cid in board[t][:MAX_BOARD_SLOTS]:
-                candidates.append((cid, False))
-        for cid, is_res in candidates:
+            candidates += board[t][:MAX_BOARD_SLOTS]
+        for cid in candidates:
             total = _shortfall(player, cid, tmp)
             for c in range(5):
                 if tmp[c]:
@@ -158,12 +157,11 @@ def greedy_action(state: E.GameState, mask: Optional[Sequence[bool]] = None
             eff = total - gold
             if eff < 0:
                 eff = 0
+            # cheapest to reach, then the most points, then the cheaper card
             key = (eff, -CARD_POINTS[cid], _COST_SUM[cid])
             if target_key is None or key < target_key:
                 target_key = key
                 target_need = tmp[:]
-        if target_need is None:
-            target_need = need
 
         best_take = None
         best_score = None
@@ -252,6 +250,11 @@ class RolloutEvaluator:
 
     Pair with :func:`state_encoder` — ``obs`` must be a sequence of
     :class:`LeafRef` (or ``(state, seat)`` pairs).
+
+    ``policy='greedy'`` draws no random numbers, so a search using it is
+    reproducible from the tree's seed alone.  ``policy='random'`` consumes
+    ``rng`` in batch order, so give each tree its own evaluator if you need
+    per-tree reproducibility under the :class:`~.scheduler.Scheduler`.
     """
 
     def __init__(self, policy: str = "greedy", max_plies: int = 60,
@@ -271,7 +274,7 @@ class RolloutEvaluator:
         for i in range(n):
             state, seat = obs[i]
             z = rollout_values(state, self.policy, self.max_plies, self.rng)
-            values[i] = seat_relative(z, seat)
+            values[i] = seat_relative(z, seat, state.num_players)
         return priors, values
 
 
@@ -351,5 +354,12 @@ class GreedyValueEvaluator:
         for i in range(n):
             state, seat = obs[i]
             priors[i] = self._prior(m[i])
-            values[i] = seat_relative(self.value(state), seat)
+            values[i] = seat_relative(self.value(state), seat,
+                                      state.num_players)
         return priors, values
+
+
+#: ``docs/AI_DESIGN.md`` §1.6 calls the NN-free anchor evaluator
+#: ``UniformRolloutEvaluator`` (uniform prior + rollout value).  That is
+#: exactly :class:`RolloutEvaluator`; the alias keeps both names valid.
+UniformRolloutEvaluator = RolloutEvaluator

@@ -22,7 +22,7 @@ an open-loop tree consistent across revisits of the same action path.
 
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import List
 
 import numpy as np
 

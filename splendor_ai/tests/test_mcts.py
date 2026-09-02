@@ -16,6 +16,7 @@ from splendor_ai.rules.actions import (
     BUY_BOARD_START, CHOOSE_TILE_START, NUM_ACTIONS, RESERVE_DECK_START,
 )
 from splendor_ai.rules.cards import CARDS, CARDS_BY_TIER, CARD_REWARD
+from splendor_ai.search.determinize import determinize, universe_rng
 from splendor_ai.search.evaluators import (
     GreedyValueEvaluator, RolloutEvaluator, UniformEvaluator, ZeroEncoder,
     state_encoder,
@@ -183,12 +184,27 @@ def test_terminal_values_team_modes(mode, n, layout):
     assert z[n:].tolist() == [0.0] * (4 - n)
 
 
-def test_seat_relative_round_trip():
+@pytest.mark.parametrize("n", [2, 3, 4])
+def test_seat_relative_round_trip(n):
+    """Index 0 is the acting seat and padding entries stay padding."""
     z = np.array([0.25, -0.5, 0.75, -1.0], dtype=np.float32)
-    for seat in range(4):
-        rel = seat_relative(z, seat)
+    z[n:] = 0.0
+    for seat in range(n):
+        rel = seat_relative(z, seat, n)
         assert rel[0] == z[seat]
-        assert np.allclose(seat_absolute(rel, seat), z)
+        assert list(rel[n:]) == [0.0] * (4 - n)
+        assert np.allclose(seat_absolute(rel, seat, n), z)
+
+
+@pytest.mark.parametrize("n", [2, 3, 4])
+def test_seat_rotation_matches_the_values_module(n):
+    """Cross-stream contract: same convention as splendor_ai/values.py."""
+    values = pytest.importorskip("splendor_ai.values")
+    z = np.array([0.25, -0.5, 0.75, -1.0], dtype=np.float32)
+    z[n:] = 0.0
+    for seat in range(n):
+        assert np.array_equal(seat_relative(z, seat, n),
+                              values.seat_relative(z, seat, n))
 
 
 # ── PUCT ──────────────────────────────────────────────────────────────────
@@ -271,9 +287,10 @@ def test_backup_maps_leaf_relative_values_onto_absolute_seats():
                 np.random.default_rng(0))
     leaf = tree.select_leaf(s, 1)
     assert leaf is not None and leaf.seat == 1
-    # index j is absolute seat (j + leaf_seat) % 4: seat 1 gets +1, seat 0 -1
+    # index j is absolute seat (j + leaf_seat) % n: in 2p, seat 1 is index 0
+    # and seat 0 is index 1
     tree.backup(leaf.token, np.ones(NUM_ACTIONS) * leaf.mask,
-                np.array([1.0, 0.0, 0.0, -1.0], dtype=np.float32))
+                np.array([1.0, -1.0, 0.0, 0.0], dtype=np.float32))
     assert list(tree.result().root_value) == [-1.0, 1.0, 0.0, 0.0]
 
 
@@ -534,3 +551,59 @@ def test_terminal_values_switches_to_values_module_when_it_lands(monkeypatch):
         # the fake module only after this test returns)
         mcts.reset_terminal_values()
     assert mcts._TERMINAL_VALUES is None
+
+
+@pytest.mark.parametrize("mode,n,layout", [
+    ("INDIVIDUAL", 2, None), ("INDIVIDUAL", 3, None), ("INDIVIDUAL", 4, None),
+    ("ONE_V_TWO", 3, None), ("TEAM", 4, "ADJACENT"), ("TEAM", 4, "OPPOSITE"),
+])
+def test_search_runs_in_every_mode(mode, n, layout):
+    """Smoke: every mode's terminal function and seat plumbing survive search."""
+    rng = np.random.default_rng(7)
+    s = E.new_game(n, mode, layout, rng=random.Random(23))
+    for _ in range(10):
+        legal = E.legal_actions(s)
+        E.apply(s, legal[int(rng.integers(len(legal)))])
+    mask = np.asarray(E.legal_mask(s), dtype=bool)
+    for ev, enc in ((UniformEvaluator(), ZeroEncoder(4)),
+                    (GreedyValueEvaluator(), state_encoder),
+                    (RolloutEvaluator("greedy", 25), state_encoder)):
+        res = run_search(s, s.current_player, ev, enc,
+                         SearchConfig(sims=60, temperature_plies=0),
+                         np.random.default_rng(1))
+        assert mask[res.action]
+        assert res.policy_target.sum() == pytest.approx(1.0, abs=1e-5)
+        assert not res.policy_target[~mask].any()
+        assert res.root_value.shape == (4,)
+        assert list(res.root_value[n:]) == [0.0] * (4 - n)
+        assert (np.abs(res.root_value) <= 1.0 + 1e-6).all()
+
+
+def test_tree_refuses_a_different_root_position():
+    a = E.new_game(2, rng=random.Random(51))
+    b = E.new_game(2, rng=random.Random(52))
+    tree = MCTS(SearchConfig(sims=4, temperature_plies=0),
+                np.random.default_rng(0))
+    tree.select_leaf(a, 0)
+    with pytest.raises(ValueError, match="root position changed"):
+        tree.select_leaf(b, 0)
+    with pytest.raises(ValueError, match="root seat changed"):
+        tree.select_leaf(a, 1)
+
+
+def test_universes_are_reused_across_simulations():
+    """K determinizations, cycled by simulation index (PC-PIMC)."""
+    s = E.new_game(3, rng=random.Random(53))
+    cfg = SearchConfig(sims=30, universes=4, temperature_plies=0)
+    tree = MCTS(cfg, np.random.default_rng(0))
+    for _ in range(cfg.sims):
+        leaf = tree.select_leaf(s, s.current_player)
+        if leaf is None:
+            continue
+        p, v = UniformEvaluator().evaluate([None], leaf.mask[None])
+        tree.backup(leaf.token, p[0], v[0])
+    assert len(tree._universes) == 4
+    for u, world in tree._universes.items():
+        expected = determinize(s, s.current_player,
+                               universe_rng(tree.base_seed, u))
+        assert world.decks == expected.decks

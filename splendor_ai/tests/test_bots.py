@@ -142,8 +142,8 @@ def test_greedy_resolves_a_pending_noble_choice():
     assert s.pending_tile_choice and len(s.pending_tile_choice) == 2
     assert s.current_player == 0                     # same seat acts again
     mask = E.legal_mask(s)
-    assert all(mask[a] == (a >= CHOOSE_TILE_START) or not mask[a]
-               for a in range(65))
+    assert [a for a in range(65) if mask[a]] == [CHOOSE_TILE_START,
+                                                 CHOOSE_TILE_START + 1]
     a = greedy_action(s, mask)
     assert a == CHOOSE_TILE_START                    # first pending tile
     E.apply(s, a)

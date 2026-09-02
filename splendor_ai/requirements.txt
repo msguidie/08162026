@@ -1,4 +1,8 @@
-# splendor_ai — rules engine + cross-language validation harness only.
-# Training/worker dependencies (torch, gymnasium, ...) land here later.
+# splendor_ai — rules engine, validation harness, encoder/network stack.
+#
+# torch: install the CPU-only wheel where there is no GPU
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
 numpy>=1.26
+torch>=2.2
+pyyaml>=6.0
 pytest>=8.0

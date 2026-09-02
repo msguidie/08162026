@@ -234,7 +234,6 @@ _GROUP_TOTALS = np.bincount(_DECK_GROUP, minlength=45).astype(np.float32)
 _DECK_GROUP_EXT = np.concatenate([_DECK_GROUP, [45, 45, 45, 45]])
 #: Deck size after the initial deal — 40/30/20 cards minus the 4 face up.
 _INITIAL_DECK = np.array([36.0, 26.0, 16.0], dtype=np.float32)
-_DECK_SCALE = 1.0 / _INITIAL_DECK
 
 _MODE_INDEX = {MODE_INDIVIDUAL: 0, MODE_TEAM: 1, MODE_ONE_V_TWO: 2}
 _LAYOUT_INDEX = {None: 0, "ADJACENT": 1, "OPPOSITE": 2}
@@ -301,20 +300,32 @@ def _card_slot_ids(state: GameState, seat: int, sink: List[int]) -> None:
     n = state.num_players
     players = state.players
     for row in state.board:
+        count = len(row)
+        if count > MAX_BOARD_SLOTS:          # never from the engine; a
+            count = MAX_BOARD_SLOTS          # doctored state must not shift
+            row = row[:MAX_BOARD_SLOTS]      # every later block
         sink.extend(row)
-        sink.extend(_PAD_CARD[MAX_BOARD_SLOTS - len(row)])
+        sink.extend(_PAD_CARD[MAX_BOARD_SLOTS - count])
     reserved = players[seat].reserved
+    count = len(reserved)
+    if count > MAX_RESERVED:
+        count = MAX_RESERVED
+        reserved = reserved[:MAX_RESERVED]
     sink.extend(reserved)
-    sink.extend(_PAD_CARD[MAX_RESERVED - len(reserved)])
+    sink.extend(_PAD_CARD[MAX_RESERVED - count])
     for j in range(1, MAX_SEATS):
         if j >= n:
             sink.extend(_PAD_CARD[MAX_RESERVED])
             continue
         p = players[(seat + j) % n]
         public = p.reserved_public
+        count = 0
         for s, cid in enumerate(p.reserved):
+            if count == MAX_RESERVED:
+                break
             sink.append(cid if public[s] else _HIDDEN_OF_TIER0[cid])
-        sink.extend(_PAD_CARD[MAX_RESERVED - len(p.reserved)])
+            count += 1
+        sink.extend(_PAD_CARD[MAX_RESERVED - count])
 
 
 def _tableau_cards(state: GameState, sink: List[int]) -> None:
@@ -357,8 +368,11 @@ def encode(state: GameState, seat: int,
     _card_slot_ids(state, seat, ids)
     idx = np.array(ids)
     blk = _CARD_STATIC[idx]                                  # (24, 25) copy
-    short = _CARD_COST_EXT[idx] - [d[0] + g[0], d[1] + g[1], d[2] + g[2],
-                                   d[3] + g[3], d[4] + g[4]]
+    # ``dtype`` keeps the arithmetic in float32: a plain Python list would
+    # promote it to float64 and the batch path would differ by an ulp.
+    short = np.subtract(_CARD_COST_EXT[idx],
+                        [d[0] + g[0], d[1] + g[1], d[2] + g[2],
+                         d[3] + g[3], d[4] + g[4]], dtype=np.float32)
     np.maximum(short, 0.0, out=short)
     total_short = short.sum(1)
     max_short = short.max(1)
@@ -419,19 +433,20 @@ def encode(state: GameState, seat: int,
     if m:
         tile_idx = np.array(tiles[:m])
         req = _TILE_REQ_EXT[tile_idx]
-        mine = np.maximum(req - [d[0], d[1], d[2], d[3], d[4]], 0.0)
+        mine = np.maximum(np.subtract(req, [d[0], d[1], d[2], d[3], d[4]],
+                                      dtype=np.float32), 0.0)
         mine_total = mine.sum(1)
         tb = np.zeros((MAX_TILE_CHOICES, TILE_FEATURES), dtype=np.float32)
         tb[:m, 0:5] = req * 0.25
         tb[:m, 5:10] = mine * 0.25
-        tb[:m, 10] = mine_total * (1.0 / 12.0)
+        tb[:m, 10] = mine_total / 12.0
         tb[:m, 11] = 1.0
         tb[:m, 12] = mine_total == 0.0
         if n > 1:
             others = np.array([players[(seat + j) % n].discount
                                for j in range(1, n)], dtype=np.float32)
             gap = np.maximum(req[None, :, :] - others[:, None, :], 0.0)
-            tb[:m, 13:12 + n] = gap.sum(2).T * (1.0 / 12.0)
+            tb[:m, 13:12 + n] = gap.sum(2).T / 12.0
         out[TILE_OFF:DECK_OFF] = tb.reshape(-1)
 
     # ---- public deck composition ----------------------------------------
@@ -607,12 +622,12 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
     pb = np.zeros((b, MAX_SEATS, PLAYER_FEATURES), dtype=np.float32)
     pb[:, :, 0:5] = pv[:, :, 0:5] / tpc[:, :, None]
     pb[:, :, 5] = pv[:, :, 5] / wild
-    pb[:, :, 6:11] = np.minimum(pv[:, :, 6:11] * (1.0 / 7.0), 1.0)
+    pb[:, :, 6:11] = np.minimum(pv[:, :, 6:11] / 7.0, 1.0)
     score = ps[:, :, 0]
-    pb[:, :, 11] = np.minimum(score * (1.0 / 15.0), 1.0)
-    pb[:, :, 12] = np.minimum(ps[:, :, 1] * 0.05, 1.0)
-    pb[:, :, 13] = ps[:, :, 2] * (1.0 / 3.0)
-    pb[:, :, 14] = np.minimum(ps[:, :, 3] * (1.0 / 3.0), 1.0)
+    pb[:, :, 11] = np.minimum(score / 15.0, 1.0)
+    pb[:, :, 12] = np.minimum(ps[:, :, 1] / 20.0, 1.0)
+    pb[:, :, 13] = ps[:, :, 2] / 3.0
+    pb[:, :, 14] = np.minimum(ps[:, :, 3] / 3.0, 1.0)
     pb[:, :, 15] = ps[:, :, 4]
     pb[:, :, 16] = 1.0
     pb[:, 0, 17] = 1.0
@@ -636,7 +651,7 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
                                  np.where(team == 1, _THRESHOLD_SOLO,
                                           _THRESHOLD_DUO),
                                  _THRESHOLD_TEAM))
-    pb[:, :, 24] = np.clip((side_total - side_thr) * (1.0 / 15.0), -1.0, 1.0)
+    pb[:, :, 24] = np.clip((side_total - side_thr) / 15.0, -1.0, 1.0)
     pb *= present[:, :, None]
     out[:, PLAYER_OFF:TILE_OFF] = pb.reshape(b, -1)
 
@@ -648,11 +663,11 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
     mine = np.maximum(req - my_disc[:, None, :], 0.0)
     mine_total = mine.sum(2)
     tb[:, :, 5:10] = mine * 0.25
-    tb[:, :, 10] = mine_total * (1.0 / 12.0)
+    tb[:, :, 10] = mine_total / 12.0
     tb[:, :, 11] = 1.0
     tb[:, :, 12] = mine_total == 0.0
     gap = np.maximum(req[:, None, :, :] - pv[:, 1:MAX_SEATS, None, 6:11], 0.0)
-    tb[:, :, 13:16] = (gap.sum(3) * (1.0 / 12.0)).transpose(0, 2, 1) \
+    tb[:, :, 13:16] = (gap.sum(3) / 12.0).transpose(0, 2, 1) \
         * present[:, None, 1:MAX_SEATS]
     tb *= (tid < EMPTY_TILE)[:, :, None]
     out[:, TILE_OFF:DECK_OFF] = tb.reshape(b, -1)
@@ -665,7 +680,7 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
     counts = (np.bincount(slot_groups.reshape(-1), minlength=b * 46)
               + np.bincount(tab_groups, minlength=b * 46)).reshape(b, 46)
     out[:, DECK_OFF:DECK_OFF + 45] = (_GROUP_TOTALS - counts[:, :45]) * 0.125
-    out[:, DECK_OFF + 45:GLOBAL_OFF] = gv[:, 10:13] * _DECK_SCALE
+    out[:, DECK_OFF + 45:GLOBAL_OFF] = gv[:, 10:13] / _INITIAL_DECK
 
     # ---- global ----------------------------------------------------------
     gb = np.zeros((b, GLOBAL_FEATURES), dtype=np.float32)
@@ -676,7 +691,7 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
     has_layout = layout > 0
     gb[rows[has_layout], 8 + layout[has_layout]] = 1.0
     gb[rows, 9 + n_players.astype(np.intp)] = 1.0
-    gb[:, 14] = np.minimum(gv[:, 5] * 0.01, 1.0)
+    gb[:, 14] = np.minimum(gv[:, 5] / 100.0, 1.0)
     frt = gv[:, 6]
     in_final = frt >= 0.0
     gb[:, 15] = in_final
@@ -694,7 +709,7 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
                                   _THRESHOLD_SOLO),
                          _THRESHOLD_TEAM)
     gb[:, 23] = np.where(is_ind[:, 0],
-                         np.minimum(other_score * (1.0 / 15.0), 1.0),
+                         np.minimum(other_score / 15.0, 1.0),
                          np.minimum(other_total / other_thr, 1.0))
     gb[:, 24] = gv[:, 8]
     gb[rows, 25 + gv[:, 9].astype(np.intp)] = 1.0

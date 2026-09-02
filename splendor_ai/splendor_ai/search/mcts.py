@@ -26,15 +26,20 @@ Shape of the algorithm
   call — ``select_leaf`` returns ``None`` for them.
 
 Evaluator contract: ``values`` handed to :meth:`MCTS.backup` are RELATIVE to
-the leaf's acting seat (index ``j`` is absolute seat ``(j + leaf_seat) % 4``);
-the tree rolls them into absolute order.  ``priors`` are a 65-vector; they are
-masked and renormalised here.
+the leaf's acting seat — index ``j`` is absolute seat ``(j + leaf_seat) % n``
+and entries ``>= n`` are padding (``splendor_ai.values.seat_relative``).  The
+tree rolls them back into absolute seat order.  ``priors`` are a 65-vector;
+they are masked and renormalised here.
+
+``terminal_values`` / ``standings_values`` delegate to ``splendor_ai/values.py``
+as soon as that module exists, and fall back to the local §1.2 implementation
+until it does.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -55,14 +60,37 @@ _ZERO4 = np.zeros(4, dtype=np.float32)
 
 # ── value vectors (§1.2) ──────────────────────────────────────────────────
 
-def seat_relative(z, seat: int) -> np.ndarray:
-    """Absolute → relative-to-``seat`` (index 0 = ``seat``)."""
-    return np.roll(np.asarray(z, dtype=np.float32), -int(seat))
+def seat_relative(z, seat: int, n: int = 4) -> np.ndarray:
+    """Absolute → relative-to-``seat`` (index 0 = ``seat``).
+
+    §1.2 writes this as ``np.roll(z, -seat)``, which is exact for a full table
+    of four; with fewer seats the rotation has to stay inside the first ``n``
+    entries so that a real value never lands in a padding slot (the same
+    mod-``n`` seat ordering the observation encoder uses for its player
+    blocks).  Identical to ``splendor_ai.values.seat_relative``.
+    """
+    return _rotate(z, -int(seat), n)
 
 
-def seat_absolute(z, seat: int) -> np.ndarray:
+def seat_absolute(z, seat: int, n: int = 4) -> np.ndarray:
     """Relative-to-``seat`` → absolute seat order.  Inverse of the above."""
-    return np.roll(np.asarray(z, dtype=np.float32), int(seat))
+    return _rotate(z, int(seat), n)
+
+
+def _rotate(z, shift: int, n: int) -> np.ndarray:
+    """``np.roll(z[:n], shift)`` in place over a 4-vector, padding untouched.
+
+    Hand-rolled because this runs once per backup and ``np.roll`` on four
+    floats costs an order of magnitude more than the loop.
+    """
+    values = np.asarray(z, dtype=np.float32).tolist()
+    if n <= 0 or shift % n == 0:
+        return np.array(values, dtype=np.float32)
+    out = list(values)
+    shift %= n
+    for j in range(n):
+        out[(j + shift) % n] = values[j]
+    return np.array(out, dtype=np.float32)
 
 
 def _rank_values(keys: Sequence[tuple], n: int) -> np.ndarray:
@@ -126,6 +154,18 @@ def _terminal_values(state: E.GameState) -> np.ndarray:
     return _team_side_values(state, lambda i, p: p.team_id, winners[0])
 
 
+_STANDINGS_VALUES = None
+
+
+def _resolve(name: str, fallback):
+    """``splendor_ai.values.<name>`` if that module exists, else ``fallback``."""
+    try:                           # pragma: no cover - depends on repo state
+        from .. import values as _values
+        return getattr(_values, name, fallback)
+    except Exception:
+        return fallback
+
+
 _TERMINAL_VALUES = None
 
 
@@ -133,18 +173,15 @@ def _resolve_terminal_values():
     """Prefer ``splendor_ai.values.terminal_values`` once that module exists."""
     global _TERMINAL_VALUES
     if _TERMINAL_VALUES is None:
-        try:                       # pragma: no cover - depends on repo state
-            from ..values import terminal_values as _tv
-            _TERMINAL_VALUES = _tv
-        except Exception:
-            _TERMINAL_VALUES = _terminal_values
+        _TERMINAL_VALUES = _resolve("terminal_values", _terminal_values)
     return _TERMINAL_VALUES
 
 
 def reset_terminal_values() -> None:
-    """Drop the cached resolution (tests / after ``values.py`` is added)."""
-    global _TERMINAL_VALUES
+    """Drop the cached resolutions (tests / after ``values.py`` is added)."""
+    global _TERMINAL_VALUES, _STANDINGS_VALUES
     _TERMINAL_VALUES = None
+    _STANDINGS_VALUES = None
 
 
 def terminal_values(state: E.GameState) -> np.ndarray:
@@ -158,7 +195,7 @@ _SIDE_THRESHOLD = {(E.MODE_ONE_V_TWO, 0): 15.0, (E.MODE_ONE_V_TWO, 1): 34.0,
                    (E.MODE_TEAM, 0): 30.0, (E.MODE_TEAM, 1): 30.0}
 
 
-def standings_values(state: E.GameState) -> np.ndarray:
+def _standings_values(state: E.GameState) -> np.ndarray:
     """Value vector of an UNFINISHED game scored by current standings.
 
     Used for ``max_plies`` truncation (§1.2, "score by current standings via
@@ -166,8 +203,6 @@ def standings_values(state: E.GameState) -> np.ndarray:
     modes compare each side's progress towards its own threshold, which is the
     natural generalisation of the ranking to asymmetric win conditions.
     """
-    if state.is_over():
-        return terminal_values(state)
     if state.mode == E.MODE_INDIVIDUAL:
         return _rank_values(_individual_keys(state), state.num_players)
     totals = {0: 0, 1: 0}
@@ -180,6 +215,16 @@ def standings_values(state: E.GameState) -> np.ndarray:
     else:
         best = 0 if prog[0] > prog[1] else 1
     return _team_side_values(state, lambda i, p: p.team_id, best)
+
+
+def standings_values(state: E.GameState) -> np.ndarray:
+    """Value vector of an unfinished game, ABSOLUTE seat order (§1.2)."""
+    global _STANDINGS_VALUES
+    if _STANDINGS_VALUES is None:
+        _STANDINGS_VALUES = _resolve("standings_values", _standings_values)
+    if state.is_over():
+        return terminal_values(state)
+    return np.asarray(_STANDINGS_VALUES(state), dtype=np.float32)
 
 
 # ── configuration ─────────────────────────────────────────────────────────
@@ -266,6 +311,7 @@ class MCTS:
         self.base_seed = int(rng.integers(1 << 62))
         self.root_state: Optional[E.GameState] = None
         self.root_seat: int = -1
+        self.num_players: int = 4
         self.root_mask: List[bool] = []
         self.root_legal: List[int] = []
         self.root_turn: int = 0
@@ -273,6 +319,9 @@ class MCTS:
         self.sims_done = 0
         self.nodes = 1
         self._pending: Dict[int, tuple] = {}
+        #: universe index -> its determinized root (cloned per simulation);
+        #: ``determinize`` is a pure function of (root, seat, universe seed).
+        self._universes: Dict[int, E.GameState] = {}
         self._next_token = 1
         self._noise_applied = False
         self.stats: Dict[str, Any] = {
@@ -296,6 +345,7 @@ class MCTS:
                 raise ValueError("MCTS: root state is already terminal")
             self.root_state = root_state
             self.root_seat = int(seat)
+            self.num_players = root_state.num_players
             self.root_mask = E.legal_mask(root_state)
             self.root_legal = [i for i, v in enumerate(self.root_mask) if v]
             if not self.root_legal:
@@ -306,6 +356,11 @@ class MCTS:
         elif seat != self.root_seat:
             raise ValueError(
                 f"MCTS: root seat changed {self.root_seat} -> {seat}")
+        elif root_state is not self.root_state:
+            # The determinized universes are cached against this exact root.
+            raise ValueError(
+                "MCTS: the root position changed between simulations — build "
+                "a new tree per root")
 
     # -- selection -------------------------------------------------------
     def _priors(self, node: _Node, legal: List[int]) -> List[float]:
@@ -350,7 +405,10 @@ class MCTS:
         W = node.W
 
         forced_k = cfg.forced_playouts_k if (is_root and cfg.root == "puct") else 0.0
-        penalty = cfg.deck_reserve_penalty if is_root else None
+        # anti-clairvoyance: one uniform draw in [0, p_tier] per tier, drawn
+        # lazily so a root without deck reserves costs nothing
+        caps = cfg.deck_reserve_penalty if is_root else None
+        penalty = None
 
         best_a = -1
         best_score = -1e30
@@ -360,10 +418,11 @@ class MCTS:
             n = N[a]
             q = (W[a * 4 + acting] / n) if n else fpu
             score = q + c_puct * ps[i] * sqrt_n / (1 + n)
-            if penalty is not None and a in _DECK_RESERVE:
-                cap = penalty[a - RESERVE_DECK_START]
-                if cap > 0.0:
-                    score -= float(self.rng.uniform(0.0, cap))
+            if caps is not None and a in _DECK_RESERVE:
+                if penalty is None:
+                    penalty = self.rng.random(3) * np.asarray(
+                        caps, dtype=np.float64)
+                score -= float(penalty[a - RESERVE_DECK_START])
             if forced_k > 0.0 and n_total > 0:
                 if n < math.sqrt(forced_k * ps[i] * n_total):
                     if score > best_forced_score:
@@ -389,8 +448,12 @@ class MCTS:
         cfg = self.cfg
         universe = self.sims_started % max(1, cfg.universes)
         self.sims_started += 1
-        state = determinize(root_state, seat,
-                            universe_rng(self.base_seed, universe))
+        world = self._universes.get(universe)
+        if world is None:
+            world = determinize(root_state, seat,
+                                universe_rng(self.base_seed, universe))
+            self._universes[universe] = world
+        state = world.clone()
 
         node = self.root
         path: List[Tuple[_Node, int]] = []
@@ -400,13 +463,21 @@ class MCTS:
             forced_root = self._gumbel_next()
 
         while True:
-            guard = 0
-            while state.phase == E.PHASE_PLAYING and E.is_stuck(state):
-                self.stats["stuck"] += 1
-                E.resign(state, state.current_player)
-                guard += 1
-                if guard > state.num_players + 1:      # pragma: no cover
-                    break
+            # A seat with no legal action resigns (the variant has no pass) and
+            # the simulation continues from whatever that leaves behind.
+            mask = None
+            if state.phase == E.PHASE_PLAYING:
+                mask = E.legal_mask(state)
+                guard = 0
+                while not any(mask):
+                    self.stats["stuck"] += 1
+                    E.resign(state, state.current_player)
+                    guard += 1
+                    if state.phase != E.PHASE_PLAYING:
+                        break
+                    if guard > state.num_players:      # pragma: no cover
+                        break
+                    mask = E.legal_mask(state)
 
             if state.phase != E.PHASE_PLAYING:
                 self._backup_values(path, node, terminal_values(state))
@@ -415,15 +486,13 @@ class MCTS:
                 self.sims_done += 1
                 return None
 
-            if depth >= cfg.max_depth:
+            if depth >= cfg.max_depth or not any(mask):
                 self._backup_values(path, node, _ZERO4)
                 self.stats["depth_truncated"] += 1
                 self._note_depth(depth)
                 self.sims_done += 1
                 return None
 
-            mask = E.legal_mask(state)
-            legal = [i for i, v in enumerate(mask) if v]
             if not node.expanded:
                 token = self._next_token
                 self._next_token += 1
@@ -434,6 +503,7 @@ class MCTS:
                             mask=np.asarray(mask, dtype=bool), token=token,
                             depth=depth)
 
+            legal = [i for i, v in enumerate(mask) if v]
             if depth == 0 and forced_root is not None:
                 a = forced_root if mask[forced_root] else \
                     self._select_action(node, legal, state.current_player, True)
@@ -483,8 +553,9 @@ class MCTS:
                 self._apply_root_noise()
             self._noise_applied = True
 
-        v_abs = seat_absolute(np.asarray(values, dtype=np.float32).reshape(-1)[:4],
-                              leaf_seat)
+        v_abs = seat_absolute(
+            np.asarray(values, dtype=np.float32).reshape(-1)[:4],
+            leaf_seat, self.num_players)
         self._backup_values(path, node, v_abs)
         self.stats["evaluated"] += 1
         self.sims_done += 1
@@ -604,7 +675,16 @@ class MCTS:
         return a
 
     def _gumbel_policy(self) -> Tuple[np.ndarray, int]:
-        """Improved policy ``softmax(logits + sigma(completedQ))`` and action."""
+        """Improved policy ``softmax(logits + sigma(completedQ))`` and action.
+
+        mctx returns ``argmax(g + logits + sigma(q))`` — the Gumbel sample —
+        which is an *exploration* choice: after sequential halving two
+        candidates usually survive and the Gumbel noise picks between them.
+        For play we return the noise-free improved-policy argmax over the
+        surviving candidates instead; :meth:`result` still samples the improved
+        policy itself during the temperature plies, which is where the
+        exploration belongs.
+        """
         target = np.zeros(NUM_ACTIONS, dtype=np.float32)
         legal = self.root_legal
         if not self._g_ready:
@@ -624,7 +704,8 @@ class MCTS:
         s -= s.max()
         e = np.exp(s)
         target[legal] = (e / e.sum()).astype(np.float32)
-        best = max(self._g_cands, key=self._g_score)
+        improved = dict(zip(legal, scores))
+        best = max(self._g_cands, key=lambda a: improved[a])
         return target, int(best)
 
     # -- result ----------------------------------------------------------
