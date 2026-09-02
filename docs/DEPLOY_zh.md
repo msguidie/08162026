@@ -37,7 +37,52 @@ Render → Environment 添加 `AI_WORKER_SECRET=<一串随机长字符串>`（�
 
 ## C. 本地 Windows 10/11 + RTX 3060 推理 worker
 
-（待 worker 完成后补全：Python 安装、CUDA 版 PyTorch、`pip install -r splendor_ai/requirements-worker.txt`、`.env`、`run_worker.bat`、开机自启。）
+worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需要端口映射、内网穿透或防火墙规则。
+详细英文说明见 `splendor_ai/README.md` 的 "Deployment worker" 一节；下面是中文步骤。
+
+1. 安装 **Python 3.11**（python.org，安装时勾选 *Add python.exe to PATH*）。
+2. 把整个仓库（含 `splendor_ai/`）放到本机，例如 `C:\splendor`。在该目录打开 PowerShell：
+
+   ```powershell
+   py -3.11 -m venv .venv
+   .venv\Scripts\activate
+   pip install torch --index-url https://download.pytorch.org/whl/cu126
+   pip install -r splendor_ai\requirements-worker.txt
+   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+   ```
+
+   **先装 CUDA 版 torch，再装其余依赖**（否则会装成 CPU 版）。最后一行打印 `True` 说明 3060 可用。
+3. 配置：
+
+   ```powershell
+   copy splendor_ai\.env.example splendor_ai\.env
+   notepad splendor_ai\.env
+   ```
+
+   至少改两项：`SERVER_URL=https://zero8162026.onrender.com`，`AI_WORKER_SECRET=<与 Render 上完全相同的值>`。
+   其它键（模型目录、时间预算、确定化数量 K、日志）在文件里有中英文说明。
+4. 放模型：把训练导出的 `shared.pt`（或 `ind2.pt / ovt.pt / team.pt` 等按模式的文件）放进 `models\`。
+   **还没有模型也可以先跑**：worker 会退化为贪心策略并打印一条警告，正好用来验证连线。
+5. 启动：
+
+   ```powershell
+   splendor_ai\run_worker.bat
+   ```
+
+   脚本会激活 `.venv`、读取 `splendor_ai\.env`，并在异常退出时自动重启（Ctrl-C 退出）。
+   离线自检：`splendor_ai\run_worker.bat --once` 会对一个内置局面算一步并打印动作。
+6. 验证：
+   - 浏览器打开 `https://zero8162026.onrender.com/api/ai/status`，应为 `{"enabled":true,"available":true,...}`；
+   - 大厅出现 **Add AI** 按钮，点一下即加入 `Bot Alpha`；团队模式下用座位上的 **AI** 小按钮给机器人选座；
+   - `logs\moves.jsonl` 每步一行（`level` 为 `search` 表示走的是神经网络 + 搜索）。
+7. 长期开机：把 `run_worker.bat` 的快捷方式放进 `shell:startup`（Win+R 输入）即可开机自启；
+   Render 免费实例休眠时 worker 会一直重试（1 s → 30 s 退避），服务醒来后自动重新注册。
+
+资源占用：显存约 1 GB（含 CUDA 上下文），内存约 1 GB，单核 CPU；默认每步思考 1.5 s（硬上限 2.5 s，服务器允许 15 s），
+在 3060 上约 2000–3000 次模拟/步。想更强就调大 `TIME_BUDGET_MS`。
+
+常见问题：`Invalid worker secret` = 两边 secret 不一致（注意空格/引号）；`/api/ai/status` 显示 `enabled:false` = Render 没设
+`AI_WORKER_SECRET`；`torch.cuda.is_available()` 为 `False` = 装成了 CPU 版 torch，`pip uninstall torch` 后按第 2 步重装。
 
 ## D. NSCC ASPIRE 2A 训练
 
