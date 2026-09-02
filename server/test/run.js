@@ -8,7 +8,10 @@ const suites = [
   ['replayRecorder', require('./replayRecorder.test')],
   ['replayGithub', require('./replayGithub.test')],
   ['replayStore', require('./replayStore.test')],
+  ['aiFallback', require('./aiFallback.test')],
+  ['aiBridge', require('./aiBridge.test')],
   ['replay e2e', require('./replay.e2e')],
+  ['ai e2e', require('./ai.e2e')],
 ];
 
 async function main() {

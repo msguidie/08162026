@@ -131,6 +131,42 @@ CARDS_BY_TIER: Tuple[Tuple[int, ...], ...] = tuple(
 )
 
 
+# ── colour rotation (docs/AI_DESIGN.md §1.4) ─────────────────────────────
+#
+# ``addCycle`` emits the five colour rotations of every template back to back,
+# so card ``5*t + i`` is the template ``t`` variant whose reward colour is
+# ``i`` and whose cost is ``cost[j] = template[(j - i) % 5]``.  Rotating every
+# colour ``c -> (c + k) % 5`` therefore maps a card onto the sibling five
+# slots away in the same cycle: reward ``(i + k) % 5`` and
+# ``cost'[j] = cost[(j - k) % 5]``.  The tile table has the same structure
+# (ids 0-4 are the 4+4 family, 5-9 the 3+3+3 family, each a 5-cycle), so both
+# tables are closed under the group and no card or tile is ever lost.
+#
+# ``tests/test_symmetry.py`` verifies the closure from the tables themselves
+# instead of trusting this comment.
+
+
+def rotate_id(card_id: int, k: int) -> int:
+    """Card id after rotating every colour ``c -> (c + k) % 5``."""
+    return card_id - card_id % 5 + (card_id + k) % 5
+
+
+def rotate_tile_id(tile_id: int, k: int) -> int:
+    """Bonus-tile id after rotating every colour ``c -> (c + k) % 5``."""
+    base = 0 if tile_id < 5 else 5
+    return base + (tile_id - base + k) % 5
+
+
+#: ``ROTATED_CARD_ID[k][card_id]`` — :func:`rotate_id` as a lookup table.
+ROTATED_CARD_ID: Tuple[Tuple[int, ...], ...] = tuple(
+    tuple(rotate_id(c, k) for c in range(NUM_CARDS)) for k in range(NUM_COLORS)
+)
+#: ``ROTATED_TILE_ID[k][tile_id]`` — :func:`rotate_tile_id` as a lookup table.
+ROTATED_TILE_ID: Tuple[Tuple[int, ...], ...] = tuple(
+    tuple(rotate_tile_id(t, k) for t in range(NUM_TILES)) for k in range(NUM_COLORS)
+)
+
+
 # ── cross-language self test ──────────────────────────────────────────────
 
 _NODE_DUMP = r"""

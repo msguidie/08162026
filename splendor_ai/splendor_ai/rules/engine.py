@@ -192,6 +192,236 @@ class GameState:
         s.tile_claimed = self.tile_claimed
         return s
 
+    # -- compact serialization ---------------------------------------------
+    #
+    # ``to_bytes()`` / ``from_bytes()`` are the replay-record format of
+    # ``docs/AI_DESIGN.md`` §1.8: deterministic (no dict iteration, no
+    # padding, no timestamps), compact (~150-250 bytes for a mid-game 4p
+    # position) and lossless for every field that can influence the rest of
+    # the game — deck ORDER included.
+    #
+    # ======  ===============================================================
+    #  bytes   contents
+    # ======  ===============================================================
+    #   0      format version (:data:`GameState.BYTES_VERSION`)
+    #   1      num_players
+    #   2      mode(2 bits) | layout(2)<<2 | phase(1)<<4 | turn_action(2)<<5
+    #   3      current_player
+    #   4      round_start_player (255 = None)
+    #   5-6    turn_number, big endian uint16
+    #   7      final_round_triggered_by + 1 (0 = None)
+    #   8+     resigned: count, then the seats in resignation order
+    #   +6     gems[6]
+    #   +      tiles: count, then tile ids
+    #   +      pending_tile_choice: 255 = None, else count + tile ids
+    #   +      game_result: 0 = None, else reason code (1 SCORE / 2 FORFEIT /
+    #          3 other), forfeitingTeamId (255 = None), winningTeamIds
+    #          (255 = absent, else count + ids)
+    #   +      board:  3 x (count + card ids), tier 1..3
+    #   +      decks:  3 x (count + card ids) in SERVER order (pop() = last)
+    #   +      players: n x (gems[6], discount[5], score uint16,
+    #          team_id (255 = None), cards (count + ids), reserved (count +
+    #          ids + a public-flag bitmask byte), tiles (count + ids))
+    # ======  ===============================================================
+    #
+    # Derived state is recomputed on load rather than stored: ``deck_counts``
+    # (lengths of ``decks``), ``config`` (:func:`make_config`) and ``teams``
+    # (from the per-player ``team_id``).  ``last_event`` / ``tile_claimed``
+    # are transient action-result payloads consumed by the caller of
+    # ``apply``; they are not part of the position and are reset to ``None``.
+    # Cosmetic ``username`` / ``avatar_seed`` are likewise not stored.
+
+    BYTES_VERSION = 1
+
+    _MODE_CODES = (MODE_INDIVIDUAL, MODE_TEAM, MODE_ONE_V_TWO)
+    _LAYOUT_CODES = (None, "ADJACENT", "OPPOSITE")
+    _TA_CODES = (None, TA_BUY, TA_TAKE_GEMS, TA_RESERVE)
+    _REASON_CODES = (None, "SCORE", "FORFEIT")
+
+    def to_bytes(self) -> bytes:
+        """Serialize the position; see the table above."""
+        b = bytearray()
+        ap = b.append
+        ap(GameState.BYTES_VERSION)
+        ap(self.num_players)
+        ap(GameState._MODE_CODES.index(self.mode)
+           | (GameState._LAYOUT_CODES.index(self.team_layout) << 2)
+           | ((1 if self.phase == PHASE_GAME_OVER else 0) << 4)
+           | (GameState._TA_CODES.index(self.turn_action) << 5))
+        ap(self.current_player)
+        ap(255 if self.round_start_player is None else self.round_start_player)
+        tn = self.turn_number
+        ap((tn >> 8) & 0xFF)
+        ap(tn & 0xFF)
+        frt = self.final_round_triggered_by
+        ap(0 if frt is None else frt + 1)
+        ap(len(self.resigned))
+        b.extend(self.resigned)
+        b.extend(self.gems)
+        ap(len(self.tiles))
+        b.extend(self.tiles)
+        pending = self.pending_tile_choice
+        if pending is None:
+            ap(255)
+        else:
+            ap(len(pending))
+            b.extend(pending)
+        gr = self.game_result
+        if gr is None:
+            ap(0)
+        else:
+            reason = gr.get("reason")
+            ap(GameState._REASON_CODES.index(reason)
+               if reason in GameState._REASON_CODES else 3)
+            forfeiting = gr.get("forfeitingTeamId")
+            ap(255 if forfeiting is None else forfeiting)
+            winning = gr.get("winningTeamIds")
+            if winning is None:
+                ap(255)
+            else:
+                ap(len(winning))
+                b.extend(winning)
+        for t in range(3):
+            row = self.board[t]
+            ap(len(row))
+            b.extend(row)
+        for t in range(3):
+            deck = self.decks[t]
+            ap(len(deck))
+            b.extend(deck)
+        for p in self.players:
+            b.extend(p.gems)
+            b.extend(p.discount)
+            score = p.score
+            ap((score >> 8) & 0xFF)
+            ap(score & 0xFF)
+            ap(255 if p.team_id is None else p.team_id)
+            ap(len(p.cards))
+            b.extend(p.cards)
+            ap(len(p.reserved))
+            b.extend(p.reserved)
+            flags = 0
+            for i, public in enumerate(p.reserved_public):
+                if public:
+                    flags |= 1 << i
+            ap(flags)
+            ap(len(p.tiles))
+            b.extend(p.tiles)
+        return bytes(b)
+
+    @staticmethod
+    def from_bytes(data) -> "GameState":
+        """Inverse of :meth:`to_bytes` (accepts ``bytes``/``memoryview``)."""
+        buf = data if isinstance(data, (bytes, bytearray)) else bytes(data)
+        version = buf[0]
+        if version != GameState.BYTES_VERSION:
+            raise ValueError(
+                f"GameState.from_bytes: unsupported format version {version} "
+                f"(this build writes {GameState.BYTES_VERSION})")
+        s = GameState()
+        n = buf[1]
+        s.num_players = n
+        packed = buf[2]
+        s.mode = GameState._MODE_CODES[packed & 3]
+        s.team_layout = GameState._LAYOUT_CODES[(packed >> 2) & 3]
+        s.phase = PHASE_GAME_OVER if (packed >> 4) & 1 else PHASE_PLAYING
+        s.turn_action = GameState._TA_CODES[(packed >> 5) & 3]
+        s.current_player = buf[3]
+        rsp = buf[4]
+        s.round_start_player = None if rsp == 255 else rsp
+        s.turn_number = (buf[5] << 8) | buf[6]
+        frt = buf[7]
+        s.final_round_triggered_by = None if frt == 0 else frt - 1
+        i = 8
+        count = buf[i]
+        i += 1
+        s.resigned = list(buf[i:i + count])
+        i += count
+        s.gems = list(buf[i:i + 6])
+        i += 6
+        count = buf[i]
+        i += 1
+        s.tiles = list(buf[i:i + count])
+        i += count
+        count = buf[i]
+        i += 1
+        if count == 255:
+            s.pending_tile_choice = None
+        else:
+            s.pending_tile_choice = list(buf[i:i + count])
+            i += count
+        reason_code = buf[i]
+        i += 1
+        if reason_code == 0:
+            s.game_result = None
+        else:
+            result: Dict[str, Any] = {
+                "reason": (GameState._REASON_CODES[reason_code]
+                           if reason_code < 3 else None)}
+            forfeiting = buf[i]
+            i += 1
+            if forfeiting != 255:
+                result["forfeitingTeamId"] = forfeiting
+            count = buf[i]
+            i += 1
+            if count != 255:
+                result["winningTeamIds"] = list(buf[i:i + count])
+                i += count
+            s.game_result = result
+        board: List[List[int]] = []
+        for _ in range(3):
+            count = buf[i]
+            i += 1
+            board.append(list(buf[i:i + count]))
+            i += count
+        s.board = board
+        decks: List[List[int]] = []
+        for _ in range(3):
+            count = buf[i]
+            i += 1
+            decks.append(list(buf[i:i + count]))
+            i += count
+        s.decks = decks
+        s.deck_counts = [len(decks[0]), len(decks[1]), len(decks[2])]
+        players: List[PlayerState] = []
+        for seat in range(n):
+            p = PlayerState(f"p{seat}", None, seat)
+            p.gems = list(buf[i:i + 6])
+            i += 6
+            p.discount = list(buf[i:i + 5])
+            i += 5
+            p.score = (buf[i] << 8) | buf[i + 1]
+            i += 2
+            team_id = buf[i]
+            i += 1
+            p.team_id = None if team_id == 255 else team_id
+            count = buf[i]
+            i += 1
+            p.cards = list(buf[i:i + count])
+            i += count
+            count = buf[i]
+            i += 1
+            p.reserved = list(buf[i:i + count])
+            i += count
+            flags = buf[i]
+            i += 1
+            p.reserved_public = [bool(flags >> j & 1) for j in range(count)]
+            p.tiles = list(buf[i + 1:i + 1 + buf[i]])
+            i += 1 + buf[i]
+            players.append(p)
+        s.players = players
+        s.config = make_config(n)
+        if s.mode != MODE_INDIVIDUAL:
+            s.teams = [
+                {"id": tid,
+                 "playerIndices": [j for j, p in enumerate(players)
+                                   if p.team_id == tid]}
+                for tid in (0, 1)
+            ]
+        else:
+            s.teams = []
+        return s
+
     # -- convenience -------------------------------------------------------
     @property
     def current(self) -> PlayerState:

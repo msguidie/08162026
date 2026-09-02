@@ -16,6 +16,7 @@ const {
 } = require('./gameLogic');
 const replayRecorder = require('./replayRecorder');
 const replayStore = require('./replayStore');
+const aiBridge = require('./aiBridge');
 
 const app = express();
 const server = http.createServer(app);
@@ -76,7 +77,12 @@ function createDefaultLobbySettings() {
 function resetLobbySettings(resetReady = false, preserveUnlimitedTime = false) {
   const unlimitedTime = preserveUnlimitedTime ? lobbySettings.unlimitedTime : false;
   lobbySettings = { ...createDefaultLobbySettings(), unlimitedTime };
-  if (resetReady) lobbyQueue.forEach(player => { player.ready = false; });
+  if (resetReady) resetLobbyReady();
+}
+
+// Bots are always ready (docs/AI_BRIDGE.md §3); humans go back to "not ready".
+function resetLobbyReady() {
+  lobbyQueue.forEach(player => { player.ready = isBotEntry(player); });
 }
 
 function lobbyState() {
@@ -87,12 +93,14 @@ function lobbyState() {
       ready: p.ready,
       wantsFirst: !!p.wantsFirst,
       avatarSeed: p.avatarSeed,
+      isAI: p.isAI === true,
     })),
     teamMode: lobbySettings.teamMode,
     teamFormat: lobbySettings.teamFormat,
     teamLayout: lobbySettings.teamLayout,
     teamSeats: lobbySettings.teamSeats.map(team => [...team]),
     unlimitedTime: lobbySettings.unlimitedTime,
+    aiAvailable: aiBridge.isAvailable(),
   };
 }
 
@@ -117,6 +125,70 @@ function hasCompleteTeamSeats() {
     && usernames.length === requiredTeamPlayerCount()
     && new Set(usernames).size === usernames.length
     && usernames.every(username => lobbyQueue.some(player => player.username === username));
+}
+
+// ── AI bots in the lobby (docs/AI_BRIDGE.md §3) ──
+// Bot accounts are ordinary accounts, auto-created on first use and rated
+// like humans. A bot lobby entry carries `isAI: true` and a synthetic
+// socket id, so every existing lookup by socket id simply never matches it.
+const BOT_USERNAMES = ['Bot Alpha', 'Bot Beta', 'Bot Gamma', 'Bot Delta'];
+
+function isBotEntry(entry) {
+  return entry?.isAI === true;
+}
+
+function humanLobbyCount() {
+  return lobbyQueue.filter(player => !isBotEntry(player)).length;
+}
+
+function ensureBotAccount(username) {
+  let account = accounts.get(username);
+  if (!account) {
+    account = { username, rating: 1000, gamesPlayed: 0, wins: 0, avatarSeed: nextAvatarSeed(), created: Date.now() };
+    accounts.set(username, account);
+  }
+  return account;
+}
+
+function lobbyCapacity() {
+  return lobbySettings.teamMode ? requiredTeamPlayerCount() : 6;
+}
+
+function addBotToLobby() {
+  if (!aiBridge.isEnabled()) return { error: 'AI is not enabled on this server' };
+  if (!aiBridge.isAvailable()) return { error: 'No AI worker is connected right now' };
+  if (humanLobbyCount() === 0) return { error: 'A human player has to be in the lobby first' };
+  if (lobbyQueue.length >= lobbyCapacity()) return { error: 'This lobby is full' };
+  const username = BOT_USERNAMES.find(name => !lobbyQueue.some(player => player.username === name));
+  if (!username) return { error: 'No more AI players are available' };
+  const account = ensureBotAccount(username);
+  lobbyQueue.push({
+    socketId: `ai:${username}`,
+    username,
+    ready: true,
+    wantsFirst: false,
+    avatarSeed: account.avatarSeed,
+    isAI: true,
+  });
+  return { ok: true, username };
+}
+
+function removeBotFromLobby(username) {
+  const bot = lobbyQueue.find(player => player.username === username && isBotEntry(player));
+  if (!bot) return { error: 'That AI player is not in this lobby' };
+  lobbyQueue = lobbyQueue.filter(player => player !== bot);
+  lobbySettings.teamSeats = lobbySettings.teamSeats.map(team =>
+    team.map(name => name === username ? null : name));
+  if (lobbySettings.teamMode && lobbyQueue.length !== requiredTeamPlayerCount()) resetLobbySettings(true, true);
+  return { ok: true };
+}
+
+// Bots never hold a lobby on their own.
+function dropBotsWithoutHumans() {
+  if (lobbyQueue.length === 0 || humanLobbyCount() > 0) return false;
+  lobbyQueue = [];
+  resetLobbySettings();
+  return true;
 }
 
 // ── REST endpoints ──
@@ -187,6 +259,9 @@ app.get('/api/replays/:id/raw', async (req, res) => {
   }
 });
 
+// ── AI bridge status (docs/AI_BRIDGE.md §5) ──
+app.get('/api/ai/status', (_req, res) => res.json(aiBridge.status()));
+
 // Self-ping to keep Render awake
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
 if (RENDER_URL) {
@@ -204,6 +279,7 @@ setInterval(() => {
   for (const [id, room] of gameRooms) {
     if (room.gameState?.phase === 'GAME_OVER' && now - room.lastPlayerAction > 5 * 60 * 1000) {
       replaySafe(() => replayRecorder.discard(room));
+      aiBridge.clearRoom(id);
       gameRooms.delete(id);
       continue;
     }
@@ -214,11 +290,13 @@ setInterval(() => {
         if (sock) { sock.emit('game_abandoned', { reason: 'Game abandoned due to inactivity.' }); sock.leave(id); }
       }
       replaySafe(() => replayRecorder.discard(room));
+      aiBridge.clearRoom(id);
       gameRooms.delete(id);
       continue;
     }
     if (now - room.created > ROOM_TTL) {
       replaySafe(() => replayRecorder.discard(room));
+      aiBridge.clearRoom(id);
       gameRooms.delete(id);
     }
   }
@@ -241,6 +319,7 @@ function removeFromLobby(socketId) {
       lobbySettings.teamSeats = lobbySettings.teamSeats.map(team =>
         team.map(username => username === leavingPlayer.username ? null : username));
     }
+    if (dropBotsWithoutHumans()) { broadcastLobby(); return; }
     if (lobbySettings.teamMode && lobbyQueue.length !== requiredTeamPlayerCount()) resetLobbySettings(true, true);
     broadcastLobby();
   }
@@ -248,6 +327,8 @@ function removeFromLobby(socketId) {
 
 // Auto-start when all >= 2 are ready
 function checkAutoStart() {
+  // A lobby of bots alone never starts a game.
+  if (humanLobbyCount() === 0) return;
   if (lobbySettings.teamMode) {
     if (lobbyQueue.length !== requiredTeamPlayerCount() || !hasCompleteTeamSeats()) return;
     if (!lobbyQueue.every(p => p.ready)) return;
@@ -284,6 +365,7 @@ function startGame() {
         socketId: player.socketId,
         avatarSeed: player.avatarSeed,
         teamId,
+        isAI: isBotEntry(player),
       };
     });
   } else {
@@ -291,6 +373,7 @@ function startGame() {
       username: p.username,
       socketId: p.socketId,
       avatarSeed: p.avatarSeed,
+      isAI: isBotEntry(p),
     }));
   }
 
@@ -310,7 +393,9 @@ function startGame() {
 
   const room = {
     id: roomId,
-    playerSockets: playerInfos.map((p, i) => ({ socketId: p.socketId, username: p.username, playerIndex: i })),
+    playerSockets: playerInfos.map((p, i) => (p.isAI
+      ? { socketId: `ai:${i}`, username: p.username, playerIndex: i, isAI: true }
+      : { socketId: p.socketId, username: p.username, playerIndex: i })),
     gameState,
     lastPlayerAction: Date.now(),
     created: Date.now(),
@@ -330,6 +415,9 @@ function startGame() {
       gameState: clientViewForPlayer(gameState, idx),
     });
   });
+
+  // Turn driver: hands over to the AI bridge when seat 0 to move is a bot.
+  aiBridge.maybeAct(room);
 
   lobbyQueue = [];
   resetLobbySettings();
@@ -402,6 +490,9 @@ function broadcastProcessedAction(room, actionResult, excludeResignedFromRatings
     const activeSocket = room.playerSockets[room.gameState.currentPlayerIndex]?.socketId;
     if (activeSocket) io.to(activeSocket).emit('tile_choice_required', { tileIds: pendingTileChoice });
   }
+
+  // Turn driver (docs/AI_BRIDGE.md §3): no-op unless the seat to move is a bot.
+  aiBridge.maybeAct(room);
 }
 
 function isPlayerConnected(room, playerIndex) {
@@ -430,6 +521,73 @@ function eliminateTimedOutPlayer(room, now = Date.now()) {
   return true;
 }
 
+// ── Shared game-action path ──
+// The body of the `game_action` socket handler, so bot seats driven by the AI
+// bridge go through exactly the same code (timers, replay hook, broadcast).
+function applyGameAction(room, playerIndex, action) {
+  const now = Date.now();
+  const timerStatus = updateTimeControl(room.gameState, now);
+  if (timerStatus.expired) {
+    eliminateTimedOutPlayer(room, now);
+    return { error: 'The active player ran out of time.' };
+  }
+
+  const actingPlayerIndex = room.gameState.currentPlayerIndex;
+  const previousTurnNumber = room.gameState.turnNumber;
+  const result = processAction(room.gameState, playerIndex, action);
+
+  if (result.error) return { error: result.error };
+
+  replaySafe(() => replayRecorder.onActionResult(room, result.result));
+  aiBridge.onActionResult(room, result.result);
+
+  consumeTurnTime(room.gameState, actingPlayerIndex, now);
+  const turnCompleted = room.gameState.turnNumber !== previousTurnNumber || room.gameState.phase === 'GAME_OVER';
+  if (turnCompleted) addTimeIncrement(room.gameState, actingPlayerIndex, now);
+  if (room.gameState.phase === 'PLAYING' && room.gameState.turnNumber !== previousTurnNumber) {
+    startRoomTurnClock(room, now);
+  }
+  room.lastPlayerAction = now;
+  broadcastProcessedAction(room, result.result);
+  replayFinishIfGameOver(room);
+
+  return { ok: true };
+}
+
+// The body of the `resign` socket handler, shared with the AI bridge
+// (a worker may answer RESIGN, and a stuck bot resigns like a stuck human).
+function resignPlayer(room, playerIndex) {
+  if (!room || room.gameState.phase !== 'PLAYING') return { error: 'Game is over' };
+
+  const now = Date.now();
+  const previousCurrentPlayer = room.gameState.currentPlayerIndex;
+  if (playerIndex === previousCurrentPlayer) consumeTurnTime(room.gameState, playerIndex, now);
+  processResign(room.gameState, playerIndex);
+  replaySafe(() => replayRecorder.onResign(room, playerIndex));
+
+  const activeCount = room.gameState.numPlayers - (room.gameState.resignedPlayers?.length || 0);
+  if (activeCount < 2) room.gameState.phase = 'GAME_OVER';
+  if (room.gameState.phase === 'PLAYING' && room.gameState.currentPlayerIndex !== previousCurrentPlayer) {
+    startRoomTurnClock(room, now);
+  }
+  room.lastPlayerAction = now;
+  broadcastProcessedAction(room, {
+    type: 'RESIGN',
+    actingPlayer: playerIndex,
+    payload: { resignedPlayerIndex: playerIndex },
+  }, room.gameState.gameMode === 'INDIVIDUAL');
+  replayFinishIfGameOver(room);
+
+  return { ok: true };
+}
+
+// ── AI bridge wiring (docs/AI_BRIDGE.md) ──
+aiBridge.init({
+  getRoom: roomId => gameRooms.get(roomId) || null,
+  applyGameAction,
+  resignPlayer,
+});
+
 const TIMER_POLL_INTERVAL = 250;
 setInterval(() => {
   const now = Date.now();
@@ -444,6 +602,10 @@ setInterval(() => {
 io.on('connection', (socket) => {
   console.log(`Connected: ${socket.id}`);
   let currentUsername = null;
+
+  // AI worker events (`ai_worker_register`, `ai_move_response`) — inert for
+  // browser clients and when AI_WORKER_SECRET is unset.
+  aiBridge.attach(socket);
 
   socket.on('login', ({ username }, cb) => {
     const account = accounts.get(username);
@@ -515,6 +677,7 @@ io.on('connection', (socket) => {
   socket.on('lobby_ready', () => {
     const player = lobbyQueue.find(p => p.socketId === socket.id);
     if (player) {
+      if (isBotEntry(player)) return; // bots are always ready
       if (lobbySettings.teamMode && !isPlayerSeated(player.username)) return;
       player.ready = !player.ready;
       broadcastLobby();
@@ -555,7 +718,7 @@ io.on('connection', (socket) => {
       unlimitedTime,
     } : { ...createDefaultLobbySettings(), unlimitedTime };
     lobbyQueue.forEach(p => {
-      p.ready = false;
+      p.ready = isBotEntry(p);
       if (lobbySettings.teamFormat === 'ONE_V_TWO') p.wantsFirst = false;
     });
     broadcastLobby();
@@ -572,7 +735,7 @@ io.on('connection', (socket) => {
       return;
     }
     lobbySettings.unlimitedTime = enabled;
-    lobbyQueue.forEach(p => { p.ready = false; });
+    resetLobbyReady();
     broadcastLobby();
     cb?.({ ok: true });
   });
@@ -586,13 +749,36 @@ io.on('connection', (socket) => {
     }
     if (layout !== 'ADJACENT' && layout !== 'OPPOSITE') { cb?.({ error: 'Invalid team layout' }); return; }
     lobbySettings.teamLayout = layout;
-    lobbyQueue.forEach(p => { p.ready = false; });
+    resetLobbyReady();
     broadcastLobby();
     cb?.({ ok: true });
   });
 
+  // ── AI lobby members (docs/AI_BRIDGE.md §3) ──
+  socket.on('lobby_add_ai', (data, cb) => {
+    const ack = typeof data === 'function' ? data : cb;
+    const player = lobbyQueue.find(p => p.socketId === socket.id);
+    if (!player) { ack?.({ error: 'Not in lobby' }); return; }
+    const result = addBotToLobby();
+    if (result.error) { ack?.({ error: result.error }); return; }
+    broadcastLobby();
+    ack?.({ ok: true, username: result.username });
+    checkAutoStart();
+  });
+
+  socket.on('lobby_remove_ai', (data, cb) => {
+    const ack = typeof data === 'function' ? data : cb;
+    const payload = typeof data === 'function' || !data ? {} : data;
+    const player = lobbyQueue.find(p => p.socketId === socket.id);
+    if (!player) { ack?.({ error: 'Not in lobby' }); return; }
+    const result = removeBotFromLobby(payload.username);
+    if (result.error) { ack?.({ error: result.error }); return; }
+    broadcastLobby();
+    ack?.({ ok: true });
+  });
+
   socket.on('select_team_seat', (data = {}, cb) => {
-    const { teamId, seatIndex } = data;
+    const { teamId, seatIndex, forUsername } = data;
     const player = lobbyQueue.find(p => p.socketId === socket.id);
     if (!player || !lobbySettings.teamMode) { cb?.({ error: 'Team mode is not active' }); return; }
     if (![0, 1].includes(teamId) || ![0, 1].includes(seatIndex)) { cb?.({ error: 'Invalid team seat' }); return; }
@@ -601,19 +787,28 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // Bots cannot click a seat themselves: any lobby member may seat one for
+    // them. `forUsername` is only ever accepted for a bot in this lobby.
+    const target = forUsername === undefined || forUsername === null
+      ? player
+      : lobbyQueue.find(p => p.username === forUsername && isBotEntry(p));
+    if (!target) { cb?.({ error: 'Only AI players can be seated by someone else' }); return; }
+
     const targetOccupant = lobbySettings.teamSeats[teamId][seatIndex];
-    if (targetOccupant && targetOccupant !== player.username) {
+    if (targetOccupant && targetOccupant !== target.username) {
       cb?.({ error: 'That seat is already occupied' });
       return;
     }
 
-    const wasOwnSeat = targetOccupant === player.username;
+    const wasOwnSeat = targetOccupant === target.username;
     lobbySettings.teamSeats = lobbySettings.teamSeats.map(team =>
-      team.map(username => username === player.username ? null : username));
-    if (!wasOwnSeat) lobbySettings.teamSeats[teamId][seatIndex] = player.username;
-    player.ready = false;
+      team.map(username => username === target.username ? null : username));
+    if (!wasOwnSeat) lobbySettings.teamSeats[teamId][seatIndex] = target.username;
+    target.ready = isBotEntry(target);
     broadcastLobby();
     cb?.({ ok: true });
+    // Seating a bot cannot be followed by the bot readying up.
+    if (isBotEntry(target)) checkAutoStart();
   });
 
   // ── Game actions — server processes all logic ──
@@ -625,35 +820,7 @@ io.on('connection', (socket) => {
     const ps = room.playerSockets.find(p => p.socketId === socket.id);
     if (!ps) { ack?.({ error: 'Not in room' }); return; }
 
-    const now = Date.now();
-    const timerStatus = updateTimeControl(room.gameState, now);
-    if (timerStatus.expired) {
-      eliminateTimedOutPlayer(room, now);
-      ack?.({ error: 'The active player ran out of time.' });
-      return;
-    }
-
-    const actingPlayerIndex = room.gameState.currentPlayerIndex;
-    const previousTurnNumber = room.gameState.turnNumber;
-    const result = processAction(room.gameState, ps.playerIndex, action);
-
-    if (result.error) {
-      ack?.({ error: result.error });
-      return;
-    }
-    replaySafe(() => replayRecorder.onActionResult(room, result.result));
-
-    consumeTurnTime(room.gameState, actingPlayerIndex, now);
-    const turnCompleted = room.gameState.turnNumber !== previousTurnNumber || room.gameState.phase === 'GAME_OVER';
-    if (turnCompleted) addTimeIncrement(room.gameState, actingPlayerIndex, now);
-    if (room.gameState.phase === 'PLAYING' && room.gameState.turnNumber !== previousTurnNumber) {
-      startRoomTurnClock(room, now);
-    }
-    room.lastPlayerAction = now;
-    broadcastProcessedAction(room, result.result);
-    replayFinishIfGameOver(room);
-
-    ack?.({ ok: true });
+    ack?.(applyGameAction(room, ps.playerIndex, action));
   });
 
   // ── Heartbeat — keeps room alive ──
@@ -678,24 +845,7 @@ io.on('connection', (socket) => {
     const ps = room.playerSockets.find(p => p.socketId === socket.id);
     if (!ps) return;
 
-    const now = Date.now();
-    const previousCurrentPlayer = room.gameState.currentPlayerIndex;
-    if (ps.playerIndex === previousCurrentPlayer) consumeTurnTime(room.gameState, ps.playerIndex, now);
-    processResign(room.gameState, ps.playerIndex);
-    replaySafe(() => replayRecorder.onResign(room, ps.playerIndex));
-
-    const activeCount = room.gameState.numPlayers - (room.gameState.resignedPlayers?.length || 0);
-    if (activeCount < 2) room.gameState.phase = 'GAME_OVER';
-    if (room.gameState.phase === 'PLAYING' && room.gameState.currentPlayerIndex !== previousCurrentPlayer) {
-      startRoomTurnClock(room, now);
-    }
-    room.lastPlayerAction = now;
-    broadcastProcessedAction(room, {
-      type: 'RESIGN',
-      actingPlayer: ps.playerIndex,
-      payload: { resignedPlayerIndex: ps.playerIndex },
-    }, room.gameState.gameMode === 'INDIVIDUAL');
-    replayFinishIfGameOver(room);
+    resignPlayer(room, ps.playerIndex);
 
     // Remove resigned player from room
     socket.leave(roomId);
@@ -716,6 +866,7 @@ io.on('connection', (socket) => {
       if (s) { s.emit('game_quit'); s.leave(roomId); }
     }
     replaySafe(() => replayRecorder.discard(room));
+    aiBridge.clearRoom(roomId);
     gameRooms.delete(roomId);
   });
 
