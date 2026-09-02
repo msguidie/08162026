@@ -161,3 +161,24 @@ argmax→greedy→NONE), per-move structured log, reconnection. `run_worker.bat`
 ## 3. Licensing
 Copy code only from MIT sources (cestpasphoto/alpha-zero-general with upstream attribution, RinascimentoFramework,
 roeey777/Splendor-AI) with notices retained; everything else re-implemented from the described ideas.
+
+## 4. Addendum after research round 2 (docs/research/profiles_round2.md)
+- **Warning evidence**: seal256/splendor (the one inspectable AlphaZero-style Splendor attempt) could not train a useful
+  value head and only reached stable self-play at a 5-point win condition. Mitigations adopted: auxiliary score/stuck
+  heads from day one; blended value target (root Q + outcome); optional **score-utility** in search
+  (`Q_search = value + score_utility_weight · predicted_score_margin`, default 0 → A/B); a **reduced-threshold
+  smoke matrix** (INDIVIDUAL win threshold override 5/8/15, engine config only, never used for deployment) so a
+  non-learning full game is diagnosed against a working short game; the **PPO fallback learner** is a real module
+  (`selfplay/ppo_learner.py`: search-free actors, per-seat returns tracked by decision points, margin-scaled terminal
+  rewards, additive -inf masking) sharing actors/encoder/network/arena — switched by `learner: az|ppo` in config.
+- KataGo defaults adopted: Dirichlet alpha = 10.83 / num_legal, PCR 25% full (recorded) / 75% cheap (not recorded),
+  noise pruning of the policy target, uncertainty-agnostic uniform sampling.
+- Gumbel root selection (m=16, sequential halving, completed-Q targets, mctx constants: gumbel_scale 1.0,
+  value_scale 0.1, maxvisit_init 50) is a first-class option, not an afterthought; A/B against PUCT in the smoke matrix.
+- Per-seat value vector semantics follow petosa/multiplayer-alphazero: the full vector is backed up unchanged in
+  absolute seat order; each node consumes only its mover's entry (max^n). No sign flips. 1v2 vectors are not zero-sum.
+- Chance is handled by per-simulation determinization on a shared action-path tree (equivalent to capping chance
+  branching at 1); never divide backed-up values by the number of chance children.
+- Opponent pool: PFSP weights (1 - winrate)^0.5 with pinned anchors; for 1v2 track solo-seat and duo-seat win rates
+  separately (an agent can be exploitable in one role while fine on average).
+- Evaluation ladder: NN-free MCTS anchor at 40/160/640 sims as an absolute, monotone strength curve.
