@@ -84,6 +84,72 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
 常见问题：`Invalid worker secret` = 两边 secret 不一致（注意空格/引号）；`/api/ai/status` 显示 `enabled:false` = Render 没设
 `AI_WORKER_SECRET`；`torch.cuda.is_available()` 为 `False` = 装成了 CPU 版 torch，`pip uninstall torch` 后按第 2 步重装。
 
-## D. NSCC ASPIRE 2A 训练
+## D. NSCC ASPIRE 2A 训练（4×A100-40G，PBS `ai` 队列）
 
-（待训练系统完成后补全：conda 环境、`requirements.txt`、`qsub scripts/nscc_train.pbs`、续训、评估、导出。）
+假设代码已经在 NSCC 的工作目录里（例如 `~/splendor`），以下都在**登录节点**执行；脚本里每一行都有英文注释。
+
+1. 装环境（一次性，登录节点有外网）：
+
+   ```bash
+   cd ~/splendor
+   bash splendor_ai/scripts/nscc_setup.sh
+   ```
+
+   它会 `module load anaconda` → 建 conda 环境 `splendor`（Python 3.11）→ `pip install -r splendor_ai/requirements.txt`
+   （Linux 上 PyPI 的 torch 自带 CUDA）→ 打印版本 → 做一次导入自检。登录节点上 `torch.cuda.is_available()` 为 False 是正常的。
+   建议再跑一遍单元测试：`conda activate splendor && python -m pytest splendor_ai/tests -q -x --ignore=splendor_ai/tests/test_worker_e2e.py`。
+
+2. 先做一次短的吞吐/连通性作业（也是 G4 门槛）：
+
+   ```bash
+   qsub -v TRAIN_TIMEOUT=30m,MAX_CHAIN=0 splendor_ai/scripts/nscc_train.pbs
+   qstat -u $USER            # 看排队/运行
+   tail -f runs/nscc/logs/train.*.log
+   ```
+
+   日志里每一代会打印 sims/s、moves/s、games/s、各模式的对局长度、stuck 率、loss，以及对固定基准（random / greedy / mcts）的胜率。
+   目标：整节点 ≥ 40 万 sims/s，每张推理 GPU ≥ 25 万 evals/s；否则先按 `splendor_ai/README.md` 的 "Training" 一节调
+   `--set` 参数（actors、games_per_actor、sims）再继续。
+
+3. 正式训练（自动续跑）：
+
+   ```bash
+   qsub splendor_ai/scripts/nscc_train.pbs
+   ```
+
+   作业申请 `select=1:ngpus=4:ncpus=64:mem=440GB`，walltime 23:59；内部用 `timeout --signal=INT 23h` 让训练器干净地保存并退出，
+   然后**自动再次 `qsub` 自己**（最多 `MAX_CHAIN=30` 段）。`runs/nscc/` 里有 `weights/latest.pt`（最新权重）、
+   `checkpoints/gen_XXXX.pt`（每代）、`metrics.jsonl`、`replay.npz`（回放缓冲）——再次提交时会自动 `--resume`。
+   想停：`touch ~/splendor/STOP`（当前段跑完后不再接续），或 `qdel <jobid>`。
+   GPU 布局：GPU0 学习器，GPU1–3 批量推理服务器，56 个 CPU 采样进程；这是评审给出的最优布局（13M 参数的网络单卡学习器已经过剩 15 倍以上，
+   DDP 只会增加故障面），学习器代码保留了 `WORLD_SIZE>1` 的 DDP 分支以备将来把网络放大到 4000 万参数以上。
+   课程：前 30 万局只练 2 人，之后切到五种配置混合（ind2 25% / ind3 10% / ind4 15% / 1v2 25% / 2v2 25%），25% 的对局混入历史检查点或贪心对手。
+   预期：第一天内超过公开项目的总算力；第 2–3 天的检查点通常就是可部署版本；总共 5–7 天。
+
+4. 评估（单 GPU，随时可跑，不影响训练）：
+
+   ```bash
+   qsub splendor_ai/scripts/nscc_eval.pbs                       # 评 runs/nscc/weights/latest.pt
+   qsub -v CKPT=runs/nscc/checkpoints/gen_0040.pt,GAMES=200 splendor_ai/scripts/nscc_eval.pbs
+   ```
+
+   产出 `reports/arena_<ckpt>_<job>.md`：对固定锚点（random=0 Elo、greedy、mcts40/160/640）的 Bradley–Terry Elo、95% 置信区间、
+   各模式胜率、按座位拆分（1v2 会分 solo/duo）、卡死/截断比例。G5 门槛：2 人模式对 mcts 锚点 ≥ 85%，且 Elo 随代数单调上升。
+
+5. 导出给本地 worker：
+
+   ```bash
+   conda activate splendor
+   python -m splendor_ai.export --ckpt runs/nscc/weights/latest.pt --out dist/model
+   ```
+
+   得到 `dist/model/shared.pt`（以及可选的 `ind2.pt … team.pt`、`manifest.json`）。把 `shared.pt` 复制到 Windows 机器的
+   `models\` 目录（scp / OneDrive 都行），重启 `run_worker.bat` 即可上线；worker 会检查 `obs_version`，旧模型会被明确拒绝而不是乱下。
+
+6. 只想训练某一种模式（专精模型）：
+
+   ```bash
+   qsub -v CONFIG=splendor_ai/configs/nscc_4xa100.yaml,RUN_DIR=runs/ovt_only splendor_ai/scripts/nscc_train.pbs
+   ```
+
+   然后在 yaml 里把 `mode_mixture` 改成只含该模式（或用 `--set`），导出为 `ovt.pt` 放进 `models\`，worker 会优先加载按模式命名的文件。
