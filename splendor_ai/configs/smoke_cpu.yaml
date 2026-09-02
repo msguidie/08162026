@@ -25,8 +25,17 @@ search_full:                 # recorded, noisy, 25% of moves (PCR)
   noise: true
   dirichlet_alpha_scale: 10.0
   noise_eps: 0.25
-  forced_playouts_k: 2.0
-  prune_policy_target: true
+  # MEASURED DEVIATION from §1.6 (which specifies KataGo forced playouts):
+  # forcing n_forced = sqrt(k*P*N) visits on every root action costs about
+  # sqrt(k*N*L) simulations, which at N=48 sims and L~25 legal actions with a
+  # near-uniform prior is sqrt(2*48*25) ~ 49 > N.  Every action gets 1-2
+  # visits, the visit distribution is uniform, and both the move and the
+  # policy target become noise.  Measured on this box with the gen-2 smoke
+  # net: SearchBot@48 vs greedy 0.25 with k=2, 0.375 with k=0.  Forced
+  # playouts stay ON in nscc_4xa100.yaml, where 600 sims and a trained
+  # (concentrated) prior put them back in their intended regime.
+  forced_playouts_k: 0.0
+  prune_policy_target: false
   c_puct: 1.5
   max_depth: 120
 
@@ -73,7 +82,7 @@ learner:
   cosine_steps: 9000
   weight_decay: 1.0e-4
   grad_clip: 1.0
-  replay_ratio: 6.0
+  replay_ratio: 8.0
   publish_every: 40
   checkpoint_every_s: 300.0
   bf16: false

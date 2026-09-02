@@ -112,8 +112,14 @@ class SearchBot:
     def __init__(self, evaluator, sims: int = 48, universes: int = 2,
                  name: Optional[str] = None) -> None:
         self.evaluator = evaluator
+        # No noise, no temperature, and no forced playouts: forcing
+        # sqrt(k*P*N) visits per root action costs ~sqrt(k*N*L) simulations,
+        # which swamps a small evaluation budget (measured: 0.25 vs 0.375 win
+        # rate against greedy at 48 sims).  Forced playouts are a *training*
+        # target-diversity device, not an evaluation one.
         self.cfg = SearchConfig(sims=int(sims), noise=False, universes=universes,
-                                temperature_plies=0, prune_policy_target=False)
+                                temperature_plies=0, prune_policy_target=False,
+                                forced_playouts_k=0.0)
         self.name = name or f"search{sims}"
 
     def act(self, state: E.GameState, seat: int, rng=None) -> Optional[int]:

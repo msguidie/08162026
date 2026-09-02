@@ -344,6 +344,30 @@ def validate(cfg: RunConfig) -> None:
         raise ValueError("learner.algorithm must be 'az' or 'ppo'")
     if cfg.replay.window_start < 1 or cfg.replay.window_end < cfg.replay.window_start:
         raise ValueError("replay window must satisfy 1 <= window_start <= window_end")
+    _warn_forced_playouts(cfg)
+
+
+#: Forced playouts cost about ``sqrt(k * sims * num_legal)`` simulations at the
+#: root.  Below this many simulations that is a large fraction of the whole
+#: budget, the visit distribution flattens, and the policy target becomes noise
+#: (measured in the G3 smoke run; see ``configs/smoke_cpu.yaml``).
+FORCED_PLAYOUT_MIN_SIMS = 200
+
+
+def _warn_forced_playouts(cfg: "RunConfig") -> None:
+    k = cfg.search_full.forced_playouts_k
+    sims = cfg.search_full.sims
+    if k > 0 and sims < FORCED_PLAYOUT_MIN_SIMS:
+        import warnings
+
+        warnings.warn(
+            f"search_full: forced playouts (k={k}) with only {sims} sims — "
+            f"forcing sqrt(k*P*N) visits on every root action spends roughly "
+            f"sqrt({k}*{sims}*num_legal) simulations, which at this budget "
+            f"flattens the visit distribution and turns the policy target into "
+            f"noise.  Set search_full.forced_playouts_k=0 (and "
+            f"prune_policy_target=false) below ~{FORCED_PLAYOUT_MIN_SIMS} sims.",
+            RuntimeWarning, stacklevel=2)
 
 
 def config_to_dict(cfg: Any) -> Any:

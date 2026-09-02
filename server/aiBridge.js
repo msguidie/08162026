@@ -417,6 +417,7 @@ function runSequence(room, entry, translated, source) {
     && after.gameState.phase === phaseBefore
     && after.gameState.turnNumber === turnBefore
     && after.gameState.currentPlayerIndex === entry.playerIndex
+    && !awaitingTileChoice
     && !translated.resign;
 
   if (failure) warn(`${source} action failed for ${entry.roomId} seat ${entry.playerIndex}: ${failure}`);
