@@ -1,0 +1,4 @@
+# splendor_ai — rules engine + cross-language validation harness only.
+# Training/worker dependencies (torch, gymnasium, ...) land here later.
+numpy>=1.26
+pytest>=8.0

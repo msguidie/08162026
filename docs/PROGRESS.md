@@ -16,8 +16,8 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done · ❌ blocked
 - ✅ Playwright screenshots (mobile + desktop) against the mock; ⬜ against the real server
 
 ## Phase C — Python engine + cross-validation
-- ⬜ splendor_ai/rules (cards, engine, actions, encode) + pytest
-- ⬜ validation/gen_trajectories.js (Node, random legal games all modes) + replay_check.py (exact state equality)
+- ✅ splendor_ai/rules (cards, engine, actions, view) + 116 pytest; encode.py deferred to Phase D
+- ✅ validation: 16,000 games / 1.27M steps in all modes, 0 mismatches (two-way legal-set check), 73k steps/s
 
 ## Phase D — Training system
 - ⬜ model / algo / league / DDP train / eval / export
