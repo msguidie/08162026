@@ -10,7 +10,7 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done · ❌ blocked
 - ⬜ Write decision record into docs/AI_DESIGN.md
 
 ## Phase B — Replay feature
-- ⬜ server/replayRecorder.js, replayEngine.js, replayGithub.js + index.js hooks + REST
+- ✅ server/replayRecorder.js, replayEngine.js, replayStore.js, replayGithub.js + index.js hooks + REST (82 tests incl. socket.io e2e in all modes)
 - ⬜ src/replay/* (browser + viewer), LoginScreen button, store/App wiring
 - ⬜ Node end-to-end test (scripted games in all modes → replay reconstructable)
 - ⬜ Playwright screenshots (mobile + desktop)

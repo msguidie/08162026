@@ -14,6 +14,8 @@ const {
   startTurnTimeControl,
   pauseTurnTimeControl,
 } = require('./gameLogic');
+const replayRecorder = require('./replayRecorder');
+const replayStore = require('./replayStore');
 
 const app = express();
 const server = http.createServer(app);
@@ -41,6 +43,19 @@ let lobbySettings = createDefaultLobbySettings();
 
 let avatarCounter = 1;
 function nextAvatarSeed() { return avatarCounter++; }
+
+// ── Replay recording (additive: a recorder failure never affects the game) ──
+function replaySafe(fn) {
+  try {
+    fn();
+  } catch (err) {
+    console.error('[replay] hook failed:', err?.message || err);
+  }
+}
+
+function replayFinishIfGameOver(room) {
+  if (room?.gameState?.phase === 'GAME_OVER') replaySafe(() => replayRecorder.finish(room));
+}
 
 // ── Helpers ──
 
@@ -134,6 +149,44 @@ app.post('/api/accounts', (req, res) => {
   res.json(account);
 });
 
+// ── Replay REST API (docs/REPLAY_FORMAT.md §4) ──
+app.get('/api/replays', async (req, res) => {
+  try {
+    res.json(await replayStore.listGames({ limit: req.query.limit, offset: req.query.offset }));
+  } catch (err) {
+    console.error('[replay] list failed:', err?.message || err);
+    res.status(500).json({ error: 'Failed to list replays' });
+  }
+});
+
+app.get('/api/replays/status', (_req, res) => res.json(replayStore.status()));
+
+app.get('/api/replays/:id', async (req, res) => {
+  try {
+    const data = await replayStore.getFrames(req.params.id);
+    if (!data) { res.status(404).json({ error: 'Replay not found' }); return; }
+    res.json({ id: req.params.id, meta: data.meta, frames: data.frames });
+  } catch (err) {
+    if (err?.name === 'ReplayCorruptError') {
+      res.status(422).json({ error: err.message, actionIndex: err.actionIndex });
+      return;
+    }
+    console.error('[replay] reconstruct failed:', err?.message || err);
+    res.status(500).json({ error: 'Failed to reconstruct replay' });
+  }
+});
+
+app.get('/api/replays/:id/raw', async (req, res) => {
+  try {
+    const json = await replayStore.getReplay(req.params.id);
+    if (!json) { res.status(404).json({ error: 'Replay not found' }); return; }
+    res.json(json);
+  } catch (err) {
+    console.error('[replay] raw fetch failed:', err?.message || err);
+    res.status(500).json({ error: 'Failed to read replay' });
+  }
+});
+
 // Self-ping to keep Render awake
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
 if (RENDER_URL) {
@@ -150,6 +203,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [id, room] of gameRooms) {
     if (room.gameState?.phase === 'GAME_OVER' && now - room.lastPlayerAction > 5 * 60 * 1000) {
+      replaySafe(() => replayRecorder.discard(room));
       gameRooms.delete(id);
       continue;
     }
@@ -159,10 +213,14 @@ setInterval(() => {
         const sock = io.sockets.sockets.get(p.socketId);
         if (sock) { sock.emit('game_abandoned', { reason: 'Game abandoned due to inactivity.' }); sock.leave(id); }
       }
+      replaySafe(() => replayRecorder.discard(room));
       gameRooms.delete(id);
       continue;
     }
-    if (now - room.created > ROOM_TTL) gameRooms.delete(id);
+    if (now - room.created > ROOM_TTL) {
+      replaySafe(() => replayRecorder.discard(room));
+      gameRooms.delete(id);
+    }
   }
 }, 60 * 1000);
 
@@ -260,6 +318,7 @@ function startGame() {
     ratingChanges: null,
   };
   gameRooms.set(roomId, room);
+  replaySafe(() => replayRecorder.begin(room));
 
   // Notify each player
   playerInfos.forEach((p, idx) => {
@@ -356,6 +415,7 @@ function startRoomTurnClock(room, now = Date.now()) {
 function eliminateTimedOutPlayer(room, now = Date.now()) {
   const timedOutPlayer = room.gameState.currentPlayerIndex;
   processResign(room.gameState, timedOutPlayer);
+  replaySafe(() => replayRecorder.onTimeout(room, timedOutPlayer));
 
   const activeCount = room.gameState.numPlayers - (room.gameState.resignedPlayers?.length || 0);
   if (activeCount < 2) room.gameState.phase = 'GAME_OVER';
@@ -366,6 +426,7 @@ function eliminateTimedOutPlayer(room, now = Date.now()) {
     actingPlayer: timedOutPlayer,
     payload: { timedOutPlayerIndex: timedOutPlayer },
   }, room.gameState.gameMode === 'INDIVIDUAL');
+  replayFinishIfGameOver(room);
   return true;
 }
 
@@ -580,6 +641,7 @@ io.on('connection', (socket) => {
       ack?.({ error: result.error });
       return;
     }
+    replaySafe(() => replayRecorder.onActionResult(room, result.result));
 
     consumeTurnTime(room.gameState, actingPlayerIndex, now);
     const turnCompleted = room.gameState.turnNumber !== previousTurnNumber || room.gameState.phase === 'GAME_OVER';
@@ -589,6 +651,7 @@ io.on('connection', (socket) => {
     }
     room.lastPlayerAction = now;
     broadcastProcessedAction(room, result.result);
+    replayFinishIfGameOver(room);
 
     ack?.({ ok: true });
   });
@@ -619,6 +682,7 @@ io.on('connection', (socket) => {
     const previousCurrentPlayer = room.gameState.currentPlayerIndex;
     if (ps.playerIndex === previousCurrentPlayer) consumeTurnTime(room.gameState, ps.playerIndex, now);
     processResign(room.gameState, ps.playerIndex);
+    replaySafe(() => replayRecorder.onResign(room, ps.playerIndex));
 
     const activeCount = room.gameState.numPlayers - (room.gameState.resignedPlayers?.length || 0);
     if (activeCount < 2) room.gameState.phase = 'GAME_OVER';
@@ -631,6 +695,7 @@ io.on('connection', (socket) => {
       actingPlayer: ps.playerIndex,
       payload: { resignedPlayerIndex: ps.playerIndex },
     }, room.gameState.gameMode === 'INDIVIDUAL');
+    replayFinishIfGameOver(room);
 
     // Remove resigned player from room
     socket.leave(roomId);
@@ -650,6 +715,7 @@ io.on('connection', (socket) => {
       const s = io.sockets.sockets.get(p.socketId);
       if (s) { s.emit('game_quit'); s.leave(roomId); }
     }
+    replaySafe(() => replayRecorder.discard(room));
     gameRooms.delete(roomId);
   });
 

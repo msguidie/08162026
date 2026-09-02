@@ -768,6 +768,8 @@ function processResign(state, playerIndex) {
 }
 
 module.exports = {
+  ALL_CARDS,
+  ALL_BONUS_TILES,
   createInitialGameState,
   clientView,
   clientViewForPlayer,
