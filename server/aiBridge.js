@@ -406,6 +406,12 @@ function runSequence(room, entry, translated, source) {
   }, 'apply');
 
   const after = deps.getRoom(entry.roomId);
+  // A buy that qualifies two or more nobles legitimately leaves the turn where
+  // it is with `_pendingTileChoice` set: the seat still owes a CHOOSE_TILE, and
+  // the maybeAct() below asks the worker for it (kind 'TILE'). That is progress,
+  // not a stall — treating it as one would hand every noble choice to the
+  // fallback and make TILE requests unreachable.
+  const awaitingTileChoice = !!after?.gameState?._pendingTileChoice?.length;
   const stalled = !!after?.gameState
     && after.gameState.phase === 'PLAYING'
     && after.gameState.phase === phaseBefore

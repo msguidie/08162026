@@ -235,6 +235,52 @@ async function run() {
       'the fallback claims the first pending tile');
   });
 
+  await test('a buy that opens a noble choice asks the worker for the tile instead of falling back', async () => {
+    freshBridge();
+    const { room, applied, resigned } = makeWorld();
+    // Buying `target` (reward 4) takes the bot's discount to [3, 3, 3, 0, 3],
+    // which meets tiles 5 and 7 at once — so the buy legitimately leaves the
+    // turn where it is with `_pendingTileChoice` set.
+    const target = ALL_CARDS.find(card => card.id === 4);
+    const pick = (reward, count) => ALL_CARDS
+      .filter(card => card.tier === 1 && card.reward === reward && card.id !== target.id)
+      .slice(0, count);
+    room.gameState.players[1].cards = [...pick(0, 3), ...pick(1, 3), ...pick(2, 3), ...pick(4, 2)];
+    room.gameState.players[1].gems = [0, 0, 0, 1, 0, 0];
+    room.gameState.bonusTiles = ALL_BONUS_TILES.filter(tile => tile.id === 5 || tile.id === 7);
+    room.gameState.board[0] = [target, ...room.gameState.board[0].slice(1)];
+
+    const { socket } = registerWorker();
+    aiBridge.maybeAct(room);
+    await sleep(25);
+    const buyRequest = socket.lastOf('ai_move_request');
+    assertEqual(buyRequest.kind, 'MOVE', 'the first request is an ordinary move');
+    socket.trigger('ai_move_response', {
+      requestId: buyRequest.requestId,
+      action: { type: 'BUY_CARD', cardId: target.id, source: 'board' },
+    }, () => {});
+
+    assertEqual(applied, [{ playerIndex: 1, action: { type: 'BUY_CARD', cardId: target.id, source: 'board' } }],
+      'the buy is applied and no fallback CHOOSE_TILE is bolted onto it');
+    assertEqual(resigned, [], 'the seat is not resigned');
+    assertEqual(room.gameState._pendingTileChoice, [5, 7], 'the noble choice is still the bot\'s to make');
+
+    await sleep(25);
+    assertEqual(socket.countOf('ai_move_request'), 2, 'exactly one follow-up request');
+    const tileRequest = socket.lastOf('ai_move_request');
+    assertEqual(tileRequest.kind, 'TILE', 'and it asks for the tile');
+    assertEqual(tileRequest.playerIndex, 1);
+    assertEqual(tileRequest.pendingTileChoice, [5, 7]);
+
+    socket.trigger('ai_move_response', {
+      requestId: tileRequest.requestId, action: { type: 'CHOOSE_TILE', tileId: 7 },
+    }, () => {});
+    assertEqual(applied.length, 2, 'the worker picked the noble itself');
+    assertEqual(applied[1].action, { type: 'CHOOSE_TILE', tileId: 7 });
+    assertEqual(room.gameState.currentPlayerIndex, 0, 'and the turn moved on');
+    assertEqual(aiBridge._inFlightCount(), 0, 'released');
+  });
+
   suite('aiBridge — fallback paths');
 
   await test('falls back to the greedy policy when no worker is connected', async () => {
