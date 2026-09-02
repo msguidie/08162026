@@ -2,3 +2,14 @@ node_modules/
 dist/
 server/node_modules/
 .env
+# Python / AI training artifacts
+__pycache__/
+*.pyc
+.venv/
+venv/
+splendor_ai/checkpoints/
+splendor_ai/runs/
+splendor_ai/logs/
+*.pt
+*.ckpt
+.pytest_cache/
