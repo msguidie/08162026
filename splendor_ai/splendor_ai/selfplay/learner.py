@@ -18,19 +18,25 @@ the obvious:
   ``checkpoints/gen_XXXX.pt`` is the per-generation history the opponent pool
   and the final arena draw from.
 
-DDP: when ``WORLD_SIZE > 1`` the model is wrapped in ``DistributedDataParallel``
-and each rank consumes ``batch // world_size`` samples, so the effective batch
-is unchanged.  Untested in this sandbox (single CPU box, no NCCL); the design
-doc's position is that a ~13M-parameter MLP does not need it below ~100M
-parameters.
+DDP is **not wired**, and says so out loud.  The class can wrap the model, but
+the *orchestrator* around it is single-rank: ``train.py`` would spawn a full set
+of actors, inference servers and evaluators on every rank, every rank would
+publish over the others' ``weights/latest.pt``, and every rank would keep its
+own replay buffer and its own ``trainer_state.pt``.  Rather than half-support
+that, :class:`Learner` refuses to start when ``WORLD_SIZE > 1`` and names what
+would have to be done first.  The design doc's position is that a
+~13M-parameter MLP does not need it below ~100M parameters (judges.md); this is
+the honest version of that position rather than a flag that looks like support.
 """
 
 from __future__ import annotations
 
 import math
 import os
+import queue
+import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
@@ -40,7 +46,95 @@ from ..model import (ACTION_VERSION, SplendorNet, compute_loss, load_checkpoint,
                      save_checkpoint)
 from .config import RunConfig
 
-__all__ = ["Learner", "lr_at"]
+__all__ = ["Learner", "lr_at", "BatchPrefetcher", "DDP_NOT_WIRED"]
+
+#: Why ``WORLD_SIZE > 1`` is refused rather than silently half-supported.
+DDP_NOT_WIRED = (
+    "DDP is not wired: this learner is driven by a single-rank orchestrator "
+    "(splendor_ai/selfplay/train.py).  Under torchrun every rank would spawn "
+    "its own actors, inference servers and eval process on the same node, "
+    "every rank would publish over the others' weights/latest.pt, and every "
+    "rank would keep a separate replay buffer and trainer_state.pt -- so the "
+    "run would be N uncoordinated runs sharing a directory.  Wiring it needs: "
+    "(1) the learner device from LOCAL_RANK, (2) actor/server/eval spawning "
+    "and every write to run_dir gated on rank 0, (3) a sharded or rank-0-only "
+    "checkpoint, (4) the replay buffer fed on rank 0 and the batch scattered. "
+    "A ~13M-parameter MLP is >15x oversupplied by one A100 (docs/AI_DESIGN.md "
+    "§1.8), so none of that is on the critical path.  Run one rank per node.")
+
+
+class BatchPrefetcher:
+    """Prepares the next learner batch on a background thread.
+
+    Batch preparation is ~272 ms per 4096 records (rehydrate the positions,
+    ``encode_batch``, densify the policy, rotate the seat-major vectors), and
+    it was happening between optimizer steps with the learner idle.  The
+    numpy/torch work on both sides releases the GIL, so the prep of batch
+    ``n+1`` overlaps the step on batch ``n``.
+
+    Two details that make it safe rather than fast-and-wrong:
+
+    * the observation buffers are preallocated and **rotated over three**.  At
+      most three batches are live at once (one being filled, one queued, one in
+      the consumer's hands), so a producer never writes into the array the
+      learner is currently reading.
+    * it produces at most one batch ahead, so a throttled learner (the replay
+      ratio holds it idle >90% of the time on the production node) does not
+      spin encoding batches nobody will consume.
+    """
+
+    def __init__(self, make_batch: Callable[[np.ndarray], Dict[str, np.ndarray]],
+                 ready: Callable[[], bool], batch_size: int, obs_dim: int,
+                 depth: int = 1, poll_s: float = 0.05) -> None:
+        self.make_batch = make_batch
+        self.ready = ready
+        self.batch_size = int(batch_size)
+        self.poll_s = float(poll_s)
+        self._bufs = [np.zeros((self.batch_size, int(obs_dim)), dtype=np.float32)
+                      for _ in range(3)]
+        self._next = 0
+        self._q: "queue.Queue" = queue.Queue(maxsize=max(1, int(depth)))
+        self._stop = threading.Event()
+        self.produced = 0
+        self.errors = 0
+        self._thread = threading.Thread(target=self._loop, name="batch-prefetch",
+                                        daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            if not self.ready():
+                self._stop.wait(self.poll_s)
+                continue
+            buf = self._bufs[self._next]
+            try:
+                batch = self.make_batch(buf)
+            except Exception as exc:                        # pragma: no cover
+                self.errors += 1
+                self._stop.wait(self.poll_s)
+                if self.errors <= 3:
+                    print(f"[learner] batch prefetch failed: "
+                          f"{type(exc).__name__}: {exc}", flush=True)
+                continue
+            self._next = (self._next + 1) % len(self._bufs)
+            while not self._stop.is_set():
+                try:
+                    self._q.put(batch, timeout=self.poll_s)
+                    self.produced += 1
+                    break
+                except queue.Full:
+                    continue
+
+    def get(self, timeout: float = 30.0) -> Optional[Dict[str, np.ndarray]]:
+        """The next batch, or None if none arrived within ``timeout``."""
+        try:
+            return self._q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
 
 
 def lr_at(step: int, lr: float, lr_final: float, warmup: int,
@@ -64,7 +158,10 @@ class Learner:
         self.model = (model or SplendorNet(cfg.net)).to(self.device)
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
         self.rank = int(os.environ.get("RANK", "0"))
-        self.ddp_model = self._maybe_ddp()
+        if self.world_size > 1:
+            raise RuntimeError(
+                f"{DDP_NOT_WIRED}  (WORLD_SIZE={self.world_size})")
+        self.ddp_model = self.model
         decay, no_decay = [], []
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
@@ -81,27 +178,16 @@ class Learner:
         self.last_checkpoint_t = time.monotonic()
         self.use_autocast = (self.device.type == "cuda" and lcfg.bf16)
 
-    # -- DDP -------------------------------------------------------------
-    def _maybe_ddp(self):
-        if self.world_size <= 1 or not self.cfg.learner.ddp:
-            return self.model
-        import torch.distributed as dist                    # pragma: no cover
-
-        if not dist.is_initialized():
-            backend = "nccl" if self.device.type == "cuda" else "gloo"
-            dist.init_process_group(backend=backend)
-        if self.device.type == "cuda":
-            torch.cuda.set_device(self.device)
-        from torch.nn.parallel import DistributedDataParallel
-
-        return DistributedDataParallel(
-            self.model,
-            device_ids=[self.device.index] if self.device.type == "cuda" else None)
-
     @property
     def local_batch(self) -> int:
-        """Per-rank batch; ``batch`` stays the global (effective) batch."""
-        return max(1, self.cfg.learner.batch // max(1, self.world_size))
+        """Samples this rank consumes per step.
+
+        Identical to ``learner.batch``: the run is single-rank (see
+        :data:`DDP_NOT_WIRED`).  Kept as a separate name because the
+        orchestrator and the prefetcher size their buffers from it, and a
+        future multi-rank version is the one thing that would change it.
+        """
+        return max(1, self.cfg.learner.batch)
 
     # -- throttle --------------------------------------------------------
     def ready(self, samples_produced: int, buffer_size: int) -> bool:

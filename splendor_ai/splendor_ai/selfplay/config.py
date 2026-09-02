@@ -42,7 +42,7 @@ from ..search.mcts import SearchConfig
 __all__ = [
     "MODE_SPECS", "SelfPlayConfig", "ReplayConfig", "LearnerConfig",
     "InferenceConfig", "EvalConfig", "RunConfig", "load_config",
-    "apply_overrides", "config_to_dict", "dump_config",
+    "apply_overrides", "config_to_dict", "dump_config", "PPO_NOT_READY",
 ]
 
 #: ``name -> (num_players, engine mode, team layout)`` for every mixture key.
@@ -101,8 +101,17 @@ class SelfPlayConfig:
         default_factory=lambda: {"latest": 0.0, "historical": 0.6, "anchor": 0.4})
     #: How many past generation checkpoints stay eligible (0 = pool disabled).
     historical_pool_size: int = 8
-    #: Historical nets kept warm per actor process.
+    #: Historical nets kept warm per actor process (an LRU).
     historical_cache: int = 2
+    #: Seconds an actor may reuse its cached listing of the opponent pool.
+    #: ``os.listdir`` of a directory the learner writes to, once per mixed
+    #: game, is pure overhead: the pool only changes once per generation.
+    historical_pool_refresh_s: float = 60.0
+    #: Probability that a historical seat reuses a checkpoint this actor has
+    #: already loaded.  A 12.6M-parameter net costs ~200 ms to load; at the
+    #: production pool size (16) and cache size (3) an unbiased draw would
+    #: reload on nearly every mixed game and stall a whole wave of games.
+    historical_reuse_prob: float = 0.85
     #: Seconds between stats emissions from each actor.
     stats_every_s: float = 20.0
     #: Seconds between ``weights/latest.pt`` freshness checks in an actor.
@@ -112,6 +121,23 @@ class SelfPlayConfig:
     #: Store the root value from search alongside the outcome so the learner
     #: can blend them (``learner.value_blend``).
     store_root_value: bool = True
+    #: Seconds an actor may go without re-reading ``run_dir/progress.json``
+    #: (the run-global game counter the curriculum phase is a function of).
+    #: Read on the weight-refresh cadence; this only bounds it from above.
+    progress_refresh_s: float = 30.0
+    #: Seconds the orchestrator gives actors (and inference servers) to finish
+    #: the wave in flight and ship its records after a stop signal.  A wave is
+    #: `games_per_actor` searches deep, so this has to exceed one wave's wall
+    #: clock or `timeout --signal=INT` costs the run its last games.
+    stop_grace_s: float = 30.0
+    #: Per-actor restart budget: more than `restart_budget` restarts inside
+    #: `restart_window_s` aborts the run instead of restarting for ever.
+    restart_budget: int = 8
+    restart_window_s: float = 900.0
+    #: Restart backoff: `restart_backoff_s * 2**(n-1)`, capped.  A crash loop
+    #: that restarts instantly burns a core and floods the log.
+    restart_backoff_s: float = 2.0
+    restart_backoff_max_s: float = 120.0
 
 
 @dataclass
@@ -128,6 +154,10 @@ class ReplayConfig:
     min_samples: int = 4096
     #: Persist the buffer inside the periodic checkpoint (``replay.npz``).
     checkpoint: bool = True
+    #: Write ``replay.npz`` from a background thread.  The save is ~41 s at the
+    #: production window and the main loop owns the learner, so a synchronous
+    #: save stalls training for that long every `checkpoint_every_s`.
+    checkpoint_async: bool = True
 
 
 @dataclass
@@ -135,7 +165,12 @@ class LearnerConfig:
     """AdamW + warmup/cosine, replay-ratio throttle, checkpointing."""
 
     #: ``az`` = AlphaZero targets from search; ``ppo`` = the fallback learner.
+    #: ``ppo`` additionally needs ``ppo_experimental: true`` — the module is
+    #: only partially implemented and would otherwise silently train
+    #: off-policy on AlphaZero targets (see :func:`validate`).
     algorithm: str = "az"
+    #: Acknowledge that ``algorithm: ppo`` is an unfinished experiment.
+    ppo_experimental: bool = False
     device: str = "cpu"
     batch: int = 4096
     lr: float = 2e-4
@@ -160,8 +195,17 @@ class LearnerConfig:
     idle_sleep_s: float = 0.05
     #: Log a metrics line every N steps.
     log_every: int = 25
-    #: Wrap in DDP when ``WORLD_SIZE > 1`` (untested in this sandbox).
-    ddp: bool = True
+    #: Prepare the next batch on a background thread while the current step
+    #: runs (numpy/torch release the GIL; batch prep is ~272 ms per 4096).
+    prefetch: bool = True
+    #: Reserved.  DDP is **not wired**: the orchestrator is single-rank (it
+    #: would spawn a full set of actors, servers and evaluators on every rank
+    #: and every rank would publish over the others' ``weights/latest.pt``).
+    #: ``WORLD_SIZE > 1`` is refused by :class:`~.learner.Learner`.
+    ddp: bool = False
+    #: Prune ``checkpoints/gen_XXXX.pt``: keep the opponent pool plus the
+    #: milestone generations, delete the rest (~125 GB over a long chain).
+    checkpoint_retention: bool = True
 
 
 @dataclass
@@ -196,6 +240,12 @@ class EvalConfig:
     search_bot: bool = True
     #: Evaluation runs in its own process so it never blocks the learner.
     async_process: bool = True
+    #: Wall-clock budget for the ONE final evaluation `shutdown` runs after
+    #: the last checkpoint.  ``0`` = skip it when the run was stopped by a
+    #: signal (the PBS chain's `timeout --signal=INT` case: the job has
+    #: minutes left, and a production final eval takes tens of them).  A
+    #: positive value runs it in a child process and kills it at the budget.
+    final_eval_seconds: float = 0.0
 
 
 @dataclass
@@ -255,8 +305,22 @@ class RunConfig:
             os.makedirs(d, exist_ok=True)
 
     # -- curriculum ------------------------------------------------------
+    @property
+    def progress_path(self) -> str:
+        """``run_dir/progress.json`` — the run-global counters actors read.
+
+        The curriculum is a function of RUN-GLOBAL progress, so it cannot be
+        computed from an actor's own game counter: that counter restarts at 0
+        on every resume and on every actor restart, which used to rewind the
+        whole node to phase 0 (2p at reduced sims) after each link of the PBS
+        chain.  The learner publishes ``{games_done, generation, instance}``
+        here atomically; actors re-read it on their weight-refresh cadence.
+        """
+        return os.path.join(self.run_dir, "progress.json")
+
     def phase_for(self, games_done: int) -> PhaseConfig:
-        """The curriculum phase in force after ``games_done`` finished games."""
+        """The curriculum phase in force after ``games_done`` RUN-GLOBAL
+        finished games (see :attr:`progress_path`)."""
         if not self.selfplay.phases:
             return PhaseConfig(until_games=None,
                                mixture=dict(self.selfplay.mode_mixture))
@@ -342,9 +406,39 @@ def validate(cfg: RunConfig) -> None:
         raise ValueError("inference.mode must be 'inproc' or 'server'")
     if cfg.learner.algorithm not in ("az", "ppo"):
         raise ValueError("learner.algorithm must be 'az' or 'ppo'")
+    if cfg.learner.algorithm == "ppo" and not cfg.learner.ppo_experimental:
+        raise ValueError(PPO_NOT_READY)
     if cfg.replay.window_start < 1 or cfg.replay.window_end < cfg.replay.window_start:
         raise ValueError("replay window must satisfy 1 <= window_start <= window_end")
     _warn_forced_playouts(cfg)
+
+
+#: Why ``learner.algorithm: ppo`` refuses to start without an explicit
+#: acknowledgement.  The PPO module is real but *unfinished*, and the pieces
+#: that are missing are exactly the ones that make the difference between PPO
+#: and "gradient ascent on somebody else's data": the actors still run MCTS and
+#: write AlphaZero targets, so the learner would train off-policy on a policy
+#: it never sampled from, with a ratio that starts at 1 by construction.
+PPO_NOT_READY = (
+    "learner.algorithm: ppo is not finished and would silently train "
+    "off-policy on AlphaZero search targets.  Unimplemented (see the TODO at "
+    "the top of splendor_ai/selfplay/ppo_learner.py):\n"
+    "  1. actor.py has no search-free branch — it still builds an MCTS and "
+    "records the search visit distribution, so no action was ever sampled "
+    "from the policy being updated and no log_prob or value estimate is "
+    "stored; PPOLearner.train_step recovers the 'action' as the argmax of the "
+    "search target and recomputes logp_old from the CURRENT weights, which "
+    "makes the importance ratio identically 1 on the first epoch;\n"
+    "  2. the replay buffer is a generational window, not an on-policy "
+    "rollout: a PPO iteration must consume the last rollout_games and drop "
+    "them;\n"
+    "  3. records carry no logp/value columns (RECORD_DTYPE has spare bytes "
+    "for them);\n"
+    "  4. advantages are normalised globally rather than per seat, and the "
+    "margin-scaled terminal reward has never been A/B'd against plain +-1.\n"
+    "Set learner.ppo_experimental: true to run it anyway (a diagnostic, never "
+    "a production run)."
+)
 
 
 #: Forced playouts cost about ``sqrt(k * sims * num_legal)`` simulations at the

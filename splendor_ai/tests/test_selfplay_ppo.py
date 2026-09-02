@@ -74,12 +74,13 @@ def test_terminal_reward_scales_with_the_margin():
 def test_ppo_learner_satisfies_the_orchestrator_interface(tmp_path):
     cfg = load_config(None, [f"run_dir={tmp_path}/run", "net.width=32",
                              "net.blocks=1", "learner.algorithm=ppo",
+                             "learner.ppo_experimental=true",
                              "learner.batch=8", "replay.min_samples=8"])
     cfg.make_dirs()
     learner = PPOLearner(cfg, ppo=PPOConfig(epochs=2, minibatch=4))
     for attr in ("ready", "train_step", "publish", "save_generation",
-                 "state_dict", "load_state_dict", "local_batch", "step",
-                 "generation", "samples_consumed"):
+                 "state_dict", "load_state_dict", "warm_start", "local_batch",
+                 "step", "generation", "samples_consumed"):
         assert hasattr(learner, attr)
     assert learner.ready(samples_produced=100, buffer_size=100)
 
@@ -108,6 +109,7 @@ def test_train_py_selects_the_ppo_learner(tmp_path):
 
     cfg = load_config(None, [f"run_dir={tmp_path}/run", "net.width=32",
                              "net.blocks=1", "learner.algorithm=ppo",
+                             "learner.ppo_experimental=true",
                              "selfplay.actors=1", "eval.enabled=false"])
     trainer = Trainer(cfg)
     assert isinstance(trainer.learner, PPOLearner)

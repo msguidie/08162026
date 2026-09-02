@@ -9,8 +9,14 @@ forward pass.
 Transport
 ---------
 ``multiprocessing.Queue`` carrying **raw buffers**, not numpy objects:
-``(client_id, req_id, rows, obs_bytes, mask_bytes)`` with ``obs`` float32 and
-``mask`` packed bits.  A queue costs a pickle of two ``bytes`` objects (a
+request ``(client_id, req_id, rows, obs_bytes, mask_bytes)`` with ``obs``
+float32 and ``mask`` packed bits, response ``(req_id, priors_bytes,
+values_bytes, weight_generation)``.  The generation on the response is what
+lets a record written in ``inference.mode=server`` be stamped with the
+generation of the weights that actually produced it: the actor holds no model
+in that mode, so without it every record was stamped 0.
+
+A queue costs a pickle of two ``bytes`` objects (a
 memcpy) rather than of two ndarrays; shared-memory slots would save the second
 copy, but a ring of shm slots has to be reclaimed correctly when an actor dies
 mid-request, and a dead actor is a routine event here (the orchestrator
@@ -44,9 +50,23 @@ from ..rules.actions import NUM_ACTIONS
 from . import configure_process
 
 __all__ = ["InferenceServer", "RemoteEvaluator", "LocalEvaluator",
-           "server_main", "WeightWatcher"]
+           "server_main", "WeightWatcher", "is_version_gate",
+           "install_stop_handlers"]
 
 _ERROR = -1
+
+
+def is_version_gate(exc: BaseException) -> bool:
+    """Is ``exc`` the ``obs_version`` / ``action_version`` refusal?
+
+    :func:`splendor_ai.model.load_checkpoint` raises ``RuntimeError`` for a
+    checkpoint from another encoder -- and ``torch.load`` raises
+    ``RuntimeError`` for a truncated file as well, so the type alone cannot
+    tell "this build cannot read these weights, ever" from "read it again in
+    50 ms".  The message can: the gate always names the version it rejected.
+    """
+    text = str(exc)
+    return "obs_version" in text or "action_version" in text
 
 
 class WeightWatcher:
@@ -57,6 +77,10 @@ class WeightWatcher:
     the ``obs_version`` / ``action_version`` gate, so a stale checkpoint from
     another encoder stops the process instead of poisoning the run.
     """
+
+    #: Attempts and pause for a torn read of ``weights/latest.pt``.
+    retries = 5
+    retry_sleep_s = 0.05
 
     def __init__(self, path: str, model, device: str = "cpu",
                  min_interval_s: float = 1.0) -> None:
@@ -89,20 +113,27 @@ class WeightWatcher:
             return False
         import torch
 
-        for attempt in range(5):
+        loaded = ckpt = None
+        for attempt in range(self.retries):
             try:
                 loaded, ckpt = load_checkpoint(self.path, map_location=self.device)
                 break
-            except RuntimeError:
-                raise                       # obs_version / action_version gate
-            except Exception:               # torn read: the writer renames, but
-                if attempt == 4:            # a network filesystem can still lag
+            except Exception as exc:
+                # The version gate is a REAL failure and must stop the process.
+                # Everything else is a torn read: the writer renames atomically
+                # but a shared filesystem can still hand out a truncated file,
+                # and torch raises RuntimeError for that too -- which is why
+                # this cannot key off the exception type (`except RuntimeError:
+                # raise` used to make the whole retry loop dead code).
+                if is_version_gate(exc) or attempt == self.retries - 1:
                     raise
-                time.sleep(0.05)
+                time.sleep(self.retry_sleep_s)
         with torch.inference_mode():
             self.model.load_state_dict(loaded.state_dict())
         self.model.eval()
-        self.signature = sig
+        # Re-stat: if the file moved again while we were reading it, the
+        # signature of what we actually loaded is the newer one.
+        self.signature = self._signature() or sig
         meta = ckpt.get("meta") or {}
         self.version = int(meta.get("version", ckpt.get("step", 0)))
         self.step = int(ckpt.get("step", 0))
@@ -130,6 +161,11 @@ class LocalEvaluator:
         self.calls = 0
         self.rows = 0
 
+    @property
+    def generation(self) -> int:
+        """Generation of the weights currently loaded (record stamping)."""
+        return int(self.watcher.generation)
+
     def refresh(self, force: bool = False) -> bool:
         return self.watcher.poll(force=force)
 
@@ -146,16 +182,36 @@ class LocalEvaluator:
 class RemoteEvaluator:
     """Client side of an :class:`InferenceServer`; same ``evaluate`` contract."""
 
+    #: Request ids are ``start_id + 1, +2, ...``.  ``start_id`` comes from the
+    #: actor's per-launch nonce, spaced this far apart, so a RESTARTED actor
+    #: never issues an id its dead predecessor already used: the replacement
+    #: inherits the same response queue and would otherwise accept a stale
+    #: reply (identical ids, both starting at 0) as the answer to its own
+    #: request -- silently scoring one game's leaves with another's priors.
+    ID_STRIDE = 1 << 24
+
     def __init__(self, client_id: int, request_q, response_q,
-                 timeout_s: float = 120.0) -> None:
+                 timeout_s: float = 120.0, start_id: int = 0) -> None:
         self.client_id = int(client_id)
         self.request_q = request_q
         self.response_q = response_q
         self.timeout_s = float(timeout_s)
-        self._req_id = 0
+        self._req_id = int(start_id)
+        self.start_id = int(start_id)
         self.calls = 0
         self.rows = 0
         self.wait_s = 0.0
+        #: replies for a request this evaluator never made (a dead actor's)
+        self.stale = 0
+        #: weight generation the server used for the last response (§1.8
+        #: instrumentation: records must carry the generation that produced
+        #: them, and in ``server`` mode the actor holds no model to ask)
+        self.generation = 0
+
+    @classmethod
+    def start_id_for(cls, nonce: int) -> int:
+        """First request id for an actor launched with ``nonce``."""
+        return (int(nonce) & 0xFFFF) * cls.ID_STRIDE
 
     def evaluate(self, obs: np.ndarray, mask: np.ndarray):
         obs = np.ascontiguousarray(obs, dtype=np.float32)
@@ -172,11 +228,17 @@ class RemoteEvaluator:
         t0 = time.perf_counter()
         while True:
             got = self.response_q.get(timeout=self.timeout_s)
-            rid, priors_buf, values_buf = got
+            rid, priors_buf, values_buf = got[0], got[1], got[2]
+            generation = int(got[3]) if len(got) > 3 else 0
             if rid == _ERROR:
                 raise RuntimeError(f"inference server failed: {priors_buf}")
-            if rid != req:                                  # pragma: no cover
+            if rid != req:
+                # A reply to somebody else's request: this actor replaced one
+                # that died with a request in flight.  Drop it and keep
+                # waiting for our own id.
+                self.stale += 1
                 continue
+            self.generation = generation
             break
         self.wait_s += time.perf_counter() - t0
         self.calls += 1
@@ -195,13 +257,22 @@ class InferenceServer:
 
     def __init__(self, device: str, net_cfg: NetConfig, weights_path: str,
                  max_batch: int = 1024, max_wait_ms: float = 1.0,
-                 reload_every_s: float = 30.0, name: str = "infer") -> None:
+                 reload_every_s: float = 30.0, name: str = "infer",
+                 stop_grace_s: float = 30.0) -> None:
         import torch
 
         self.device = device
         self.name = name
         self.max_batch = int(max_batch)
         self.max_wait_s = float(max_wait_ms) / 1000.0
+        #: After a stop signal the server keeps serving until its request
+        #: queue goes quiet, for at most this long.  It must outlive the
+        #: actors' last wave: `timeout --signal=INT` signals the whole process
+        #: group, so a server that exited immediately would strand every actor
+        #: mid-search on `response_q.get`, and their finished games with them.
+        self.stop_grace_s = float(stop_grace_s)
+        #: set by the SIGINT/SIGTERM handler in :func:`server_main`
+        self.signalled = False
         self.model = SplendorNet(net_cfg).to(device).eval()
         self.watcher = WeightWatcher(weights_path, self.model, device,
                                      min_interval_s=reload_every_s)
@@ -244,10 +315,21 @@ class InferenceServer:
         # event is shared by every process in the run and must not be set by a
         # single server draining its queue).
         retiring = False
-        while not stop_event.is_set():
+        deadline: Optional[float] = None
+        while True:
+            stopping = self.signalled or stop_event.is_set()
+            if stopping and deadline is None:
+                deadline = time.perf_counter() + self.stop_grace_s
+                print(f"[{self.name}] stopping: serving in-flight requests for "
+                      f"up to {self.stop_grace_s:.0f}s", flush=True)
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
             batch = self._gather(request_q, stop_event)
             if not batch:
-                if retiring:
+                # `_gather` blocks 100 ms on an empty queue, so an empty batch
+                # after a stop means every actor has stopped asking: the wave
+                # in flight finished and it is safe to go.
+                if retiring or deadline is not None:
                     break
                 self.watcher.poll()
                 continue
@@ -264,7 +346,7 @@ class InferenceServer:
                 for client_id, _req, _rows, _o, _m in batch:
                     q = response_qs.get(client_id)
                     if q is not None:
-                        q.put((_ERROR, info, None))
+                        q.put((_ERROR, info, None, 0))
                 print(info, flush=True)
                 raise
             self.stats["seconds"] += time.perf_counter() - t0
@@ -308,6 +390,7 @@ class InferenceServer:
         values_np = values.to("cpu").numpy().astype(np.float32, copy=False)
 
         off = 0
+        generation = int(self.watcher.generation)
         for (cid, req, n, _o, _m) in batch:
             q = response_qs.get(cid)
             if q is None:                                   # pragma: no cover
@@ -315,25 +398,58 @@ class InferenceServer:
                 continue
             q.put((req,
                    np.ascontiguousarray(priors_np[off:off + n]).tobytes(),
-                   np.ascontiguousarray(values_np[off:off + n]).tobytes()))
+                   np.ascontiguousarray(values_np[off:off + n]).tobytes(),
+                   generation))
             off += n
         self.stats["batches"] += 1
         self.stats["requests"] += len(batch)
         self.stats["rows"] += total
 
 
+def install_stop_handlers(on_signal) -> None:
+    """SIGINT/SIGTERM set a flag; they do not raise.
+
+    The PBS chain stops a job with ``timeout --signal=INT``, which signals the
+    whole **process group** -- every actor and every inference server, not just
+    the trainer.  Default handling would raise ``KeyboardInterrupt`` inside
+    whatever the process happened to be doing (a search, a queue put, a
+    ``torch`` forward), losing the wave in flight and its finished games.  With
+    a flag instead, each process finishes what it is doing, ships it, and
+    exits 0.
+    """
+    import signal
+
+    def handler(signum, _frame):
+        on_signal(signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):                       # not the main thread
+            pass
+
+
 def server_main(device: str, net_cfg_dict: Dict[str, Any], weights_path: str,
                 request_q, response_qs: Dict[int, Any], stop_event,
                 max_batch: int = 1024, max_wait_ms: float = 1.0,
                 reload_every_s: float = 30.0, torch_threads: int = 1,
-                name: str = "infer", ready_event=None) -> None:
+                name: str = "infer", ready_event=None,
+                stop_grace_s: float = 30.0) -> None:
     """Process entry point for one inference server."""
     configure_process(torch_threads)
+    server = None
     try:
         server = InferenceServer(device, NetConfig.from_dict(dict(net_cfg_dict)),
                                  weights_path, max_batch=max_batch,
                                  max_wait_ms=max_wait_ms,
-                                 reload_every_s=reload_every_s, name=name)
+                                 reload_every_s=reload_every_s, name=name,
+                                 stop_grace_s=stop_grace_s)
+
+        def _stop(signum):
+            print(f"[{name}] signal {signum}: draining", flush=True)
+            server.signalled = True
+
+        install_stop_handlers(_stop)
         if ready_event is not None:
             ready_event.set()
         server.run(request_q, response_qs, stop_event)

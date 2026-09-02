@@ -16,13 +16,30 @@ if the window would not fit in RAM.
 
 ``save``/``load`` round-trip the whole buffer through a single ``.npz`` so a
 PBS job that restarts resumes with its data (and its generation boundaries)
-intact.  This module is numpy-only on purpose: the tests, and the actors, never
-have to import torch to touch it.
+intact.  Two things about the save that matter at production size (~30M
+records, ~12 GB):
+
+* it writes **one array per generation** instead of concatenating the window
+  into a single array first — the concatenate alone was a second full copy of
+  the buffer (2x RAM) and most of the ~41 s the save cost;
+* it can run on a **background thread** (:meth:`ReplayBuffer.save_async`) so
+  the main loop, which is also the learner, does not stall on it.  The
+  snapshot it hands the thread is a list of the *existing* generation arrays;
+  nothing in this class ever mutates an array in place, so the writer sees a
+  consistent buffer even as the run keeps adding to it.  The rename is atomic
+  and happens only after the temp file is fully written.
+
+Thread safety: every mutation and every read of the block lists takes
+``self._lock`` (uncontended, ~50 ns).  It is what makes the learner's
+background batch prefetch safe against a generation closing underneath it.
+This module is numpy-only on purpose: the tests, and the actors, never have to
+import torch to touch it.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -117,6 +134,13 @@ class ReplayBuffer:
         #: lifetime counters (kept across trims, restored from a checkpoint)
         self.total_added = 0
         self.total_dropped = 0
+        #: generations dropped by ``max_samples`` rather than by the window --
+        #: i.e. how often the RAM cap, not the design, chose the window
+        self.cap_drops = 0
+        self.cap_dropped_samples = 0
+        self._lock = threading.RLock()
+        self._saver: Optional[threading.Thread] = None
+        self._save_error: Optional[BaseException] = None
 
     # -- writing ---------------------------------------------------------
     def add(self, records) -> int:
@@ -126,30 +150,34 @@ class ReplayBuffer:
         records = np.asarray(records, dtype=RECORD_DTYPE)
         if not len(records):
             return 0
-        self._pending.append(records)
-        self._pending_n += len(records)
-        self.total_added += len(records)
-        # Keep the number of blocks bounded: a 20k-game generation arrives as
-        # thousands of small shipments and ``sample`` touches every block it
-        # draws from, so compact them as they come in.
-        if len(self._pending) > self.compact_every:
-            self._pending = [np.concatenate(self._pending)]
+        with self._lock:
+            self._pending.append(records)
+            self._pending_n += len(records)
+            self.total_added += len(records)
+            # Keep the number of blocks bounded: a 20k-game generation arrives
+            # as thousands of small shipments and ``sample`` touches every
+            # block it draws from, so compact them as they come in.  Rebinding
+            # the list (never mutating a block) is what keeps a concurrent
+            # reader -- the batch prefetcher, the background saver -- safe.
+            if len(self._pending) > self.compact_every:
+                self._pending = [np.concatenate(self._pending)]
         return len(records)
 
     def close_generation(self, generation: Optional[int] = None) -> int:
         """Seal the open generation and trim the window.  Returns its size."""
-        gen = self.generation if generation is None else int(generation)
-        if self._pending:
-            block = (self._pending[0] if len(self._pending) == 1
-                     else np.concatenate(self._pending))
-            self.generations.append((gen, block))
-        else:
-            self.generations.append((gen, empty(0)))
-        size = self._pending_n
-        self._pending = []
-        self._pending_n = 0
-        self.generation = gen + 1
-        self.trim()
+        with self._lock:
+            gen = self.generation if generation is None else int(generation)
+            if self._pending:
+                block = (self._pending[0] if len(self._pending) == 1
+                         else np.concatenate(self._pending))
+                self.generations = self.generations + [(gen, block)]
+            else:
+                self.generations = self.generations + [(gen, empty(0))]
+            size = self._pending_n
+            self._pending = []
+            self._pending_n = 0
+            self.generation = gen + 1
+            self.trim()
         return size
 
     def window_size(self, generation: Optional[int] = None) -> int:
@@ -160,16 +188,39 @@ class ReplayBuffer:
         return int(round(self.window_start + span * frac))
 
     def trim(self) -> int:
-        """Drop whole generations that fall outside the window or the cap."""
-        dropped = 0
-        keep = max(1, self.window_size())
-        while len(self.generations) > keep:
-            dropped += len(self.generations.pop(0)[1])
-        while (len(self.generations) > 1
-               and self.sealed_size() > self.max_samples):
-            dropped += len(self.generations.pop(0)[1])
-        self.total_dropped += dropped
-        return dropped
+        """Drop whole generations that fall outside the window or the cap.
+
+        The two reasons are counted separately: dropping because the ramped
+        window moved on is the design; dropping because ``max_samples`` was
+        reached means the RAM cap silently shortened the window the run
+        believes it is training on, which the trainer warns about once.
+        """
+        with self._lock:
+            dropped = 0
+            keep = max(1, self.window_size())
+            gens = list(self.generations)
+            while len(gens) > keep:
+                dropped += len(gens.pop(0)[1])
+            cap_dropped = 0
+            while (len(gens) > 1
+                   and sum(len(b) for _, b in gens) > self.max_samples):
+                block = gens.pop(0)[1]
+                cap_dropped += len(block)
+                self.cap_drops += 1
+            self.generations = gens
+            self.cap_dropped_samples += cap_dropped
+            self.total_dropped += dropped + cap_dropped
+            return dropped + cap_dropped
+
+    def retained_generations(self) -> int:
+        """Sealed generations actually held -- the *true* window, which is
+        ``window_size()`` unless ``max_samples`` cut it shorter."""
+        return len(self.generations)
+
+    def window_truncated(self) -> bool:
+        """True when ``max_samples``, not the ramp, is choosing the window."""
+        return self.retained_generations() < min(self.window_size(),
+                                                 self.generation)
 
     # -- reading ---------------------------------------------------------
     def sealed_size(self) -> int:
@@ -194,18 +245,19 @@ class ReplayBuffer:
         sampling"); the open generation is included so a fresh run can start
         learning before the first generation closes.
         """
-        blocks = self._blocks()
-        if not blocks:
-            raise ValueError("replay buffer is empty")
-        sizes = np.array([len(b) for b in blocks], dtype=np.int64)
-        total = int(sizes.sum())
-        flat = self.rng.integers(0, total, size=batch)
-        edges = np.concatenate([[0], np.cumsum(sizes)])
-        which = np.searchsorted(edges, flat, side="right") - 1
-        out = empty(batch)
-        for bi in np.unique(which):
-            rows = flat[which == bi] - edges[bi]
-            out[which == bi] = blocks[bi][rows]
+        with self._lock:
+            blocks = self._blocks()
+            if not blocks:
+                raise ValueError("replay buffer is empty")
+            sizes = np.array([len(b) for b in blocks], dtype=np.int64)
+            total = int(sizes.sum())
+            flat = self.rng.integers(0, total, size=batch)
+            edges = np.concatenate([[0], np.cumsum(sizes)])
+            which = np.searchsorted(edges, flat, side="right") - 1
+            out = empty(batch)
+            for bi in np.unique(which):
+                rows = flat[which == bi] - edges[bi]
+                out[which == bi] = blocks[bi][rows]
         return out
 
     def batch(self, batch: int, value_blend: float = 0.0) -> Dict[str, np.ndarray]:
@@ -223,36 +275,111 @@ class ReplayBuffer:
             "max_samples": self.max_samples,
         }
 
-    def save(self, path: str) -> str:
-        """Write the whole buffer to ``path`` (npz, atomic rename)."""
-        blocks = []
-        ids = []
-        sizes = []
-        for gen, block in self.generations:
-            blocks.append(block)
-            ids.append(gen)
+    def _snapshot(self) -> Dict[str, Any]:
+        """A consistent, copy-free view of the buffer for the writer.
+
+        Only *references* to the existing blocks are taken.  Nothing in this
+        class mutates a block in place (``add`` appends to a list, ``trim``
+        rebinds it), so the writer can take as long as it likes while the run
+        carries on filling the next generation.
+        """
+        with self._lock:
+            blocks = [(int(gen), block) for gen, block in self.generations]
+            pending = list(self._pending)
+            pending_n = self._pending_n
+            meta = self.state_dict()
+            meta["open_generation"] = bool(pending)
+            return {"blocks": blocks, "pending": pending,
+                    "pending_n": pending_n, "meta": meta}
+
+    @staticmethod
+    def _write_snapshot(path: str, snap: Dict[str, Any]) -> str:
+        """Write one ``.npz`` per generation array, then rename atomically.
+
+        No ``np.concatenate`` over the whole window: at the production size
+        that single call is a second full copy of the buffer (2x RAM) and most
+        of the ~41 s the save used to cost.  ``np.savez`` streams each array
+        into the archive one at a time instead.
+        """
+        arrays: Dict[str, np.ndarray] = {}
+        ids: List[int] = []
+        sizes: List[int] = []
+        for i, (gen, block) in enumerate(snap["blocks"]):
+            arrays[f"gen_{i}"] = block
+            ids.append(int(gen))
             sizes.append(len(block))
-        if self._pending:
-            blocks.append(np.concatenate(self._pending))
-            ids.append(self.generation)
-            sizes.append(self._pending_n)
-        data = (np.concatenate(blocks) if blocks else empty(0))
+        pending = snap["pending"]
+        if pending:
+            block = (pending[0] if len(pending) == 1 else np.concatenate(pending))
+            arrays[f"gen_{len(ids)}"] = block
+            ids.append(int(snap["meta"]["generation"]))
+            sizes.append(len(block))
+        meta = snap["meta"]
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        tmp = f"{path}.tmp{os.getpid()}"
-        meta = self.state_dict()
-        meta["open_generation"] = bool(self._pending)
+        tmp = f"{path}.tmp{os.getpid()}.{threading.get_ident()}"
         np.savez(tmp,
-                 records=data,
                  gen_ids=np.array(ids, dtype=np.int64),
                  gen_sizes=np.array(sizes, dtype=np.int64),
+                 blocks=np.array([len(ids)], dtype=np.int64),
                  meta=np.array([repr(meta)], dtype=object),
-                 **{f"meta_{k}": np.array(v) for k, v in meta.items()})
+                 **{f"meta_{k}": np.array(v) for k, v in meta.items()},
+                 **arrays)
+        # The rename happens only here, after np.savez has closed the file:
+        # a reader (a resume) either sees the previous buffer or this one,
+        # never a half-written archive.
         os.replace(tmp + ".npz", path)
         return path
 
+    def save(self, path: str) -> str:
+        """Write the whole buffer to ``path`` (npz, atomic rename)."""
+        self.join_save()
+        return self._write_snapshot(path, self._snapshot())
+
+    def save_async(self, path: str) -> bool:
+        """Start a background save.  Returns False if one is still running.
+
+        Skipping rather than queueing is deliberate: the caller checkpoints on
+        a timer, and a save that has not finished by the next tick means the
+        buffer is bigger than the disk is fast — writing twice as often would
+        only make that worse.
+        """
+        with self._lock:
+            if self._saver is not None and self._saver.is_alive():
+                return False
+            snap = self._snapshot()
+
+            def _run() -> None:
+                try:
+                    self._write_snapshot(path, snap)
+                except BaseException as exc:                # pragma: no cover
+                    self._save_error = exc
+                    print(f"[replay] background save to {path} failed: "
+                          f"{type(exc).__name__}: {exc}", flush=True)
+
+            self._saver = threading.Thread(target=_run, name="replay-save",
+                                           daemon=True)
+            self._saver.start()
+            return True
+
+    def join_save(self, timeout: Optional[float] = None) -> bool:
+        """Wait for a background save.  Returns True when none is running."""
+        saver = self._saver
+        if saver is None:
+            return True
+        saver.join(timeout)
+        return not saver.is_alive()
+
+    def saving(self) -> bool:
+        return self._saver is not None and self._saver.is_alive()
+
     def load(self, path: str) -> "ReplayBuffer":
+        """Read a buffer written by :meth:`save` (either layout).
+
+        ``gen_<i>`` arrays are the current, per-generation layout; a single
+        concatenated ``records`` array is what older runs wrote, and is still
+        read so a checkpoint from before this change resumes.
+        """
         with np.load(path, allow_pickle=True) as fh:
-            data = fh["records"]
             ids = fh["gen_ids"]
             sizes = fh["gen_sizes"]
             get = lambda k, d: (fh[f"meta_{k}"].item() if f"meta_{k}" in fh else d)
@@ -260,17 +387,24 @@ class ReplayBuffer:
             self.total_added = int(get("total_added", 0))
             self.total_dropped = int(get("total_dropped", 0))
             open_gen = bool(get("open_generation", False))
-        self.generations = []
-        self._pending = []
-        self._pending_n = 0
-        offset = 0
-        for i, (gen, size) in enumerate(zip(ids.tolist(), sizes.tolist())):
-            block = data[offset:offset + size]
-            offset += size
-            if open_gen and i == len(ids) - 1:
-                if size:
-                    self._pending = [block]
-                    self._pending_n = size
-            else:
-                self.generations.append((int(gen), block))
+            legacy = fh["records"] if "records" in fh else None
+            blocks: List[np.ndarray] = []
+            offset = 0
+            for i, size in enumerate(sizes.tolist()):
+                if legacy is not None:
+                    blocks.append(legacy[offset:offset + size])
+                    offset += size
+                else:
+                    blocks.append(np.asarray(fh[f"gen_{i}"]))
+        with self._lock:
+            self.generations = []
+            self._pending = []
+            self._pending_n = 0
+            for i, (gen, block) in enumerate(zip(ids.tolist(), blocks)):
+                if open_gen and i == len(blocks) - 1:
+                    if len(block):
+                        self._pending = [block]
+                        self._pending_n = len(block)
+                else:
+                    self.generations.append((int(gen), block))
         return self

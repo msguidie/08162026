@@ -25,6 +25,14 @@ Status
 * :func:`records_to_rollout` — reads the *same* :mod:`.sample` records the AZ
   actors write.
 
+``train.py`` refuses to start with ``learner.algorithm: ppo`` unless
+``learner.ppo_experimental: true`` is also set, and prints this list
+(:data:`splendor_ai.selfplay.config.PPO_NOT_READY`) when it does.  Without the
+first item below the learner is not PPO at all: the action it "took" is the
+argmax of an MCTS visit distribution, and ``logp_old`` is recomputed from the
+current weights, so the importance ratio is 1 by construction on the first
+epoch and the clipping does nothing.
+
 TODO before this path can be trusted (it has never been run end to end):
 
 1. ``actor.py`` needs a search-free branch (``inference.mode`` unchanged, but
@@ -296,6 +304,19 @@ class PPOLearner:
                 "generation": self.generation,
                 "samples_consumed": self.samples_consumed,
                 "published": self.published, "learner": "ppo"}
+
+    def warm_start(self, path: str) -> None:
+        """Initialise from an existing checkpoint (e.g. :mod:`.bootstrap`).
+
+        The same contract as :meth:`splendor_ai.selfplay.learner.Learner.warm_start`
+        -- the orchestrator calls it for ``--warm-start`` and does not know
+        which learner it is driving, so its absence was an ``AttributeError``
+        thrown minutes into a run.
+        """
+        from ..model import load_checkpoint
+
+        model, _ckpt = load_checkpoint(path, map_location=str(self.device))
+        self.model.load_state_dict(model.state_dict())
 
     def load_state_dict(self, state: Dict[str, Any]) -> None:
         if state.get("obs_version") != OBS_VERSION:
