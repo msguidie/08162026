@@ -23,16 +23,16 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done · ❌ blocked
 - ✅ D1 encoder (OBS v1 = 860), C5 symmetry (exact on 100k states), terminal values, 12.5M-param net + checkpoint gate
 - ✅ D1 search: PIMC PUCT/Gumbel MCTS, evaluators, scheduler, bots; G2 passed (greedy ≥96% vs random; MCTS@400 81% vs greedy)
 - 🟨 D2 self-play system: actors, inference servers, replay window, learner, train orchestrator, configs, bootstrap
-- 🟨 D2 arena (paired seeds, seat rotation, Bradley–Terry), export, PBS scripts
+- ✅ D2 arena (paired seeds, seat rotation, Bradley–Terry, 54 tests), export bundle, NSCC PBS scripts + setup
 - ⬜ G3 CPU smoke run in this sandbox (beats random/greedy)
 - ⬜ PBS scripts + requirements
 
 ## Phase E — Deployment
 - ✅ server/aiBridge.js + aiFallback.js + lobby AI seats + WaitingRoom UI (126 server tests incl. bot e2e in 2p/1v2/2v2 and worker-crash fallback)
-- 🟨 splendor_ai/worker (Windows 3060) + run_worker.bat
-- ⬜ local end-to-end: AI plays 2p / 1v2 / 2v2 against scripted humans
+- ✅ splendor_ai/worker (Windows 3060) + run_worker.bat (30 real-server games, all modes, every bot move from the worker)
+- ✅ local end-to-end: AI plays 2p / 1v2 (solo+duo) / 2v2 / 3p against scripted humans; lobby UI screenshots QA'd
 
 ## Phase F — Docs & delivery
-- ⬜ requirements.txt, requirements-worker.txt, PBS scripts, README, Chinese delivery notes
-- ⬜ Independent review + adversarial verification workflow
+- ✅ requirements.txt, requirements-worker.txt, PBS scripts, README sections; ✅ docs/DEPLOY_zh.md A–D
+- 🟨 Independent review + adversarial verification workflow (running on everything except selfplay/)
 - ⬜ Commit & push
