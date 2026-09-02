@@ -12,6 +12,8 @@ search_full:
   sims: 24
   universes: 2
   noise: true
+  forced_playouts_k: 0.0     # see the note in smoke_cpu.yaml: forced playouts
+  prune_policy_target: false # need ~200+ sims to be anything but noise
   max_depth: 80
 search_fast:
   sims: 8
