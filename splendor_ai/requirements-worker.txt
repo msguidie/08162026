@@ -1,0 +1,19 @@
+# splendor_ai deployment worker — the minimum needed to serve moves.
+#
+# torch is NOT pinned to a build here: install the CUDA wheel FIRST so pip
+# does not pull the default one, then install this file.  On an RTX 3060 any
+# current CUDA build works:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+#   pip install -r requirements-worker.txt
+#
+# CPU-only machine (the worker runs fine, just slower):
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+numpy>=1.26
+torch>=2.2
+python-socketio[client]>=5.11
+websocket-client>=1.7
+python-dotenv>=1.0
+pyyaml>=6.0

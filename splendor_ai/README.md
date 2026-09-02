@@ -184,3 +184,450 @@ file verbatim and returns the final `GameState`.
   `can_afford` iterates ~2.4 entries instead of 5 and bails out early.
 * `GameState.clone()` is a shallow structural copy (card ids are ints);
   > 200 k clones/s.
+
+---
+
+## Deployment worker
+
+`splendor_ai/worker/` is the piece that runs on **your** machine and plays the
+bot seats on the live server.  It is a socket.io **client**: it dials out to
+Render, so there is no port to forward, no tunnel to buy and no inbound
+firewall rule to add — Windows Defender never even asks.  The wire contract is
+`docs/AI_BRIDGE.md` §1; the design is `docs/AI_DESIGN.md` §1.9.
+
+```
+                    ai_move_request  ─────────────►
+   Render server                                     your PC: worker + RTX 3060
+   (free tier)      ◄─────────────  ai_move_response
+```
+
+| module | what it does |
+| --- | --- |
+| `worker/config.py` | `.env` → `WorkerConfig` (no YAML, no CLI ceremony) |
+| `worker/adapter.py` | `hydrate(payload) -> (GameState, seat)` and `to_wire(state, action)` |
+| `worker/agent.py` | `MoveAgent`: net + MCTS under a wall clock, with the fallback ladder |
+| `worker/client.py` | socket.io plumbing, reconnection, `logs/moves.jsonl` |
+| `worker/worker.py` | the entry point (`python -m splendor_ai.worker.worker`) |
+
+### Install on Windows
+
+1. **Python 3.11** from [python.org](https://www.python.org/downloads/) (tick
+   *Add python.exe to PATH*).  3.12 works too; 3.13 is ahead of some wheels.
+2. Open PowerShell in the folder you cloned this repository into:
+
+   ```powershell
+   py -3.11 -m venv .venv
+   .venv\Scripts\activate
+   pip install torch --index-url https://download.pytorch.org/whl/cu126
+   pip install -r splendor_ai\requirements-worker.txt
+   ```
+
+   Install **torch first, from the CUDA index** — otherwise pip resolves the
+   default wheel and you get a CPU-only build.  An RTX 3060 (compute 8.6) runs
+   any current CUDA build; cu124 and cu126 are both fine.  Check with:
+
+   ```powershell
+   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+   ```
+
+   `True` means the GPU is visible.  No GPU?  Everything below still works,
+   just with fewer simulations per move (see *Latency*).
+
+3. Configure:
+
+   ```powershell
+   copy splendor_ai\.env.example splendor_ai\.env
+   notepad splendor_ai\.env
+   ```
+
+   Set `SERVER_URL` to your Render URL and `AI_WORKER_SECRET` to the exact
+   value of the same variable in the Render dashboard.  Every key is
+   documented in the file, in English and Chinese.
+
+4. Put a checkpoint in `MODEL_DIR` (default `models\`) as `shared.pt`, or
+   per-mode files `ind2.pt ind3.pt ind4.pt ovt.pt team.pt` — the worker
+   prefers the mode-specific file and falls back to `shared.pt`.
+   `python -m splendor_ai.export --ckpt runs\<run>\weights\latest.pt --out models`
+   writes exactly that layout.
+   **No checkpoint yet?  Start it anyway** — it runs on the greedy ladder and
+   logs a warning, which is the intended way to test the wiring before the
+   first model exists.
+
+5. Run it:
+
+   ```powershell
+   splendor_ai\run_worker.bat
+   ```
+
+   The batch file activates `.venv`, points the worker at `splendor_ai\.env`
+   and restarts it if it ever exits unexpectedly.  Ctrl-C stops it (answer
+   `Y` to "Terminate batch job").  `run_worker.sh` is the Linux/macOS twin.
+
+### Verifying
+
+```powershell
+splendor_ai\run_worker.bat --once          # offline: hydrate one position, print the move
+```
+
+prints the chosen action as JSON and exits — no server, no secret needed.  It
+is the fastest way to tell "my install is broken" from "my connection is
+broken".  `--once <file.json>` replays a saved `ai_move_request` payload.
+
+With the worker running:
+
+* `https://<your-server>/api/ai/status` →
+  `{"enabled":true,"available":true,"name":"home-3060","modes":[...]}`.
+  `enabled:false` means `AI_WORKER_SECRET` is not set **on Render**;
+  `available:false` means no worker is connected right now.
+* the lobby shows an **Add AI** button; each click seats one bot
+  (`Bot Alpha`, `Bot Beta`, …).  In team modes you seat a bot with the same
+  team-seat buttons you use for yourself.
+* `logs\moves.jsonl` grows by one line per move:
+
+  ```json
+  {"ts":"…","requestId":"ai-7","roomId":"game-…","seat":1,"mode":"ind4",
+   "kind":"MOVE","level":"search","sims":2680,"ms":1502.4,"queueMs":0.2,
+   "action":{"type":"BUY_CARD","cardId":12,"source":"board"},
+   "actionIndex":47,"rootValue":[0.31,-0.10,-0.11,-0.10],"value":-0.10}
+  ```
+
+  `level` is the ladder rung that produced the move (`search` → `policy` →
+  `greedy` → `none`); anything but `search` on a machine with a checkpoint is
+  worth investigating.
+
+### Expected VRAM and latency
+
+The network is a ~12.6 M-parameter MLP (width 768 × 10 blocks) evaluated one
+position at a time — tiny by GPU standards.
+
+| | |
+| --- | --- |
+| VRAM | ~200 MB of weights + activations, ~1 GB with the CUDA context; a 12 GB 3060 is >10× oversized |
+| RAM | ~1 GB resident |
+| CPU | one core: `torch.set_num_threads(1)`, one move at a time |
+| sims in a 1.5 s budget, RTX 3060 | ~2,000–3,000 (the pure-Python tree caps out near 3,300 sims/s, so the GPU is *not* the bottleneck) |
+| sims in a 1.5 s budget, CPU only | ~420 with the full net, ~1,900 with the smoke net |
+| move latency | soft budget 1.5 s, hard 2.5 s, server deadline 15 s |
+
+The search is *anytime*: it simulates in small chunks and stops at
+`TIME_BUDGET_MS`, so a slower machine plays weaker rather than late.
+`HARD_BUDGET_MS` is the ceiling it never crosses, and the worker additionally
+keeps `DEADLINE_MARGIN_MS` in hand before the server's own `deadlineMs`.  Raise
+`TIME_BUDGET_MS` for a stronger bot (the ceiling is the 15 s server deadline);
+lower `UNIVERSES` if you would rather spend the budget on depth than on
+re-sampling the hidden cards.
+
+### The fallback ladder
+
+Every rung is tried in order and anything that raises, times out or produces an
+action that fails re-validation falls through to the next one:
+
+1. **search** — net + PIMC MCTS, K determinization universes, optional C5
+   colour-rotation ensemble at the root;
+2. **policy** — the network's policy argmax over the legal actions;
+3. **greedy** — the 1-ply heuristic of `bots.GreedyBot`, no network at all;
+4. **none** — `{"type":"NONE"}`, which is only ever correct when the seat is
+   genuinely stuck (10 tokens, 3 reserved, nothing affordable — this variant
+   has no pass); the server then resigns it.
+
+Two guards sit on top: a **1-ply stuck filter** that refuses to walk into that
+trap when another move avoids it, and a **re-validation** of the chosen action
+against a freshly hydrated copy of the payload before it goes on the wire.  If
+the worker still cannot answer, the server plays its own greedy fallback
+(`docs/AI_BRIDGE.md` §2) — the game never waits on you.
+
+### Troubleshooting
+
+| symptom | cause and fix |
+| --- | --- |
+| `registration refused: Invalid worker secret` | `AI_WORKER_SECRET` differs from the Render value.  Watch for trailing spaces and smart quotes; the comparison is byte-exact. |
+| `/api/ai/status` says `enabled:false` | `AI_WORKER_SECRET` is unset **on Render**.  All AI features stay hidden until it is set. |
+| `cannot reach https://… — retrying in 8 s` | Normal on the Render free tier: the service sleeps after ~15 minutes idle.  The worker retries for ever with exponential backoff (1 s → 30 s) and re-registers by itself once the service wakes; open the site in a browser to wake it immediately. |
+| the lobby has no **Add AI** button | `aiAvailable` is false: either no worker is connected or the secret is unset on the server. |
+| `no usable checkpoint under models` | Expected before the first model exists; the worker plays the greedy ladder.  Drop `shared.pt` in and restart. |
+| `checkpoint … has obs_version N but this build encodes obs_version M` | The checkpoint predates an encoder change.  Re-export from a current run; the version gate exists so an old model never silently scores garbage. |
+| `torch.cuda.is_available()` is `False` | The CPU wheel got installed.  `pip uninstall torch`, then reinstall from the cu126 index. |
+| moves are `level:"greedy"` on a GPU box | The checkpoint failed to load — the worker logs the reason once at startup. |
+| Windows firewall prompt | There should not be one: the worker only makes outbound connections.  If something asks, you are running the *server* by mistake. |
+
+### Tests
+
+```bash
+# adapter, hydration invariants, wire format, the ladder (~5 s)
+python -m pytest splendor_ai/tests/test_worker_adapter.py
+
+# full stack: real Node server + real worker + scripted humans (~2 min)
+python -m pytest splendor_ai/tests/test_worker_e2e.py -s
+SPLENDOR_E2E_GAMES=10 python -m pytest splendor_ai/tests/test_worker_e2e.py -s
+```
+
+The e2e test boots `server/index.js` with `AI_WORKER_SECRET=test`, starts the
+real worker twice (once with no checkpoint, once with a freshly initialised
+smoke network so the search path runs) and plays 2p, 1v2 with the bot on each
+side, 2v2 and 3p games in which
+`splendor_ai/worker/dev/humanDriver.mjs` drives the human seats with random
+legal moves.  It asserts that every bot turn was answered **by the worker**
+(`moves.jsonl` lines per room == bot turns), that the server never fell back
+for a worker fault, that no action was rejected, that every game reached
+`GAME_OVER` and that p99 latency stayed inside the budget.
+
+**The G6 gate** (`docs/AI_DESIGN.md` §2: ≥500 games with zero rejected actions
+or timeouts) is meant for your own machine, where a real GPU and real
+checkpoints are available:
+
+```bash
+SPLENDOR_E2E_GAMES=100 python -m pytest splendor_ai/tests/test_worker_e2e.py -s
+```
+
+100 games × 5 scenarios = 500 games; budget a few hours and point `MODEL_DIR`
+at the real checkpoints by editing the constants at the top of the test.
+
+---
+
+## Evaluation & export
+
+Three modules turn a checkpoint into a number and then into a deployable file:
+
+| module | what it is |
+| --- | --- |
+| `splendor_ai/anchors.py` | the **frozen** anchor ladder (`random`, `greedy`, `mcts40`, `mcts160`, `mcts640`) plus `net:`/`search:` bots built from a checkpoint, all addressed by spec string |
+| `splendor_ai/arena.py` | paired-seed, seat-rotated match runner + joint Bradley–Terry (BayesElo-style) fit + Markdown/JSON report |
+| `splendor_ai/export.py` | the deployment bundle: `shared.pt` (+ per-mode copies), `manifest.json`, an optional TorchScript trace |
+
+### Commands
+
+```bash
+# 1. rate the anchors against each other (the ladder must be monotone)
+python -m splendor_ai.arena --bots random greedy mcts40 mcts160 \
+    --modes ind2 ind3 ind4 ovt team --games 100 --workers 16 \
+    --out reports/anchors.md
+
+# 2. rate a checkpoint: weights alone (net:) and weights + search (search:)
+python -m splendor_ai.arena \
+    --bots random greedy mcts160 mcts640 \
+           net=net:runs/nscc/weights/latest.pt \
+           search=search:runs/nscc/weights/latest.pt:400 \
+    --modes ind2 ind3 ind4 ovt team --games 400 --workers 16 \
+    --device cuda --out reports/gen0040.md
+
+# 3. package the checkpoint for the worker, with that Elo table inside it
+python -m splendor_ai.export --ckpt runs/nscc/weights/latest.pt \
+    --out dist/model --modes all --elo reports/gen0040.json
+```
+
+Bot spec grammar (`anchors.make_bot`), usable anywhere `--bots` is:
+
+```
+random | greedy | mcts<N>            the frozen ladder (any N works)
+net:<ckpt>[:c5]                      policy argmax, no search
+search:<ckpt>:<sims>[:c5]            the same weights inside the MCTS
+label=<spec>                         rename it in the report
+```
+
+`:c5` turns on the C5 colour-symmetry ensemble (§1.4): the net is evaluated on
+all five colour rotations and averaged — the same trick the deployment worker
+uses at the root. From Python:
+
+```python
+from splendor_ai.anchors import anchor_ladder, make_factory
+from splendor_ai.arena import run_matches, write_reports, fit_bradley_terry
+
+bots = anchor_ladder(("random", "greedy", "mcts40"))
+bots["net"] = make_factory("search:runs/nscc/weights/latest.pt:400", device="cuda")
+results = run_matches(bots, ["ind2", "ovt", "team"], games_per_pairing=200,
+                      seed=0, workers=16)
+write_reports(results, "reports/arena.md")          # + reports/arena.json
+elo = fit_bradley_terry(results, anchor="random", bootstrap=1000)
+```
+
+### What the arena actually does
+
+* **Paired seeds.** Every seating of a *seed group* plays the same deal, so a
+  pair of games differs only in who sat where. Deals depend on
+  `(seed, mode, group)` and nothing else, so different pairings — and
+  different arena runs — see the same deals (common random numbers).
+* **Full seat rotation.** 2p swaps. 3p/4p seat a pairing alternately (`A B A`)
+  and play every cyclic rotation, plus the mirrored composition on odd tables,
+  which makes seat occupancy exactly balanced. A table of *n* distinct bots
+  plays a cyclic **Latin square** (each bot in each seat exactly once). Never
+  the biased 1-vs-(n−1) arrangement.
+* **Team roles rotate, sides stay pure.** In 2v2 and 1v2 a side is always one
+  bot, and the group plays both side assignments and both within-side orders.
+  1v2 additionally reports **solo** and **duo** win rates separately: an agent
+  can be exploitable in one role and look fine on average.
+* **Outcome buckets.** `SCORE`, `FORFEIT`, `TRUNCATED` (`--max-plies`, default
+  400) and a **STALE** rate — games where a seat had no legal move and had to
+  resign (this variant has no pass). A rising STALE rate in self-play means the
+  agent is learning to force deadlocks; watch it.
+* **Parallelism.** `--workers N` forks N processes with BLAS/OMP threads pinned
+  to 1. Results are reassembled in schedule order, so the report is identical
+  whatever `--workers` you use.
+
+Runtime is dominated by the MCTS anchors (pure Python). Rough single-core
+costs: `random`/`greedy` ≈ 5 ms/game, `mcts40` ≈ 0.7 s, `mcts160` ≈ 3 s,
+`mcts640` ≈ 12 s (2p; 4p is ~2× that). Budget with that before raising
+`--games`.
+
+### How to read the Elo table
+
+```
+## Elo — joint Bradley–Terry fit (anchor `random` = 0)
+
+| bot      | Elo | 95% CI     | games | score |
+| -------- | --: | :--------: | ----: | ----: |
+| `greedy` | 560 | 468 …  692 |   102 | 94.1% |
+| `mcts40` | 154 |  76 …  248 |   102 | 39.7% |
+| `random` |   0 |   0 …    0 |   102 | 16.2% |
+```
+
+* **One joint fit, not a chain.** Every game constrains every rating through a
+  single Bradley–Terry likelihood (Zermelo/MM iteration), so a bot that never
+  met `random` is still placed on the same scale through the anchors it did
+  meet. Chained pairwise deltas — what most published Splendor projects
+  report — cannot be composed and are not comparable.
+* **The scale is ordinary Elo** (`400/ln 10` per log-strength unit): +400 means
+  a 10:1 expected score, +200 ≈ 76%. `random` is pinned to 0 **by
+  construction**; only *differences* carry information.
+* **CIs are a percentile bootstrap over seed groups**, not over games — games
+  inside a group are the same deal from rotated seats and are not independent.
+  If two CIs overlap, you have not measured a difference. The judges' rule:
+  **no promotion decision on fewer than 400 paired games per pairing**.
+* **`score`** is the raw share of pairwise points (draws as half) across every
+  opponent it faced — useful as a sanity check on the fit, useless for
+  comparing bots that faced different fields.
+* An unbeaten bot would have infinite strength, so the fit adds half a virtual
+  drawn game per pairing (`prior=0.5`, BayesElo's trick). At 100+ games the
+  shrinkage is a few Elo; at 10 games it is large — read small-sample tables
+  as "at least this strong", and look at the CI.
+* Per-mode tables repeat the fit inside each mode. Expect multiplayer ratings
+  to compress: at 4p the chance baseline is 25%, so +300 Elo in `ind4` is a
+  bigger achievement than +300 in `ind2`.
+* **Seat win share** in each mode is the standing seat-asymmetry detector.
+  In `ind2` a healthy first-player advantage shows here; in `ovt` the shares
+  sum to >100% because both duo seats win together.
+
+### What the anchors mean
+
+| anchor | what it is | why it is in the ladder |
+| --- | --- | --- |
+| `random` | uniform over the legal actions | the absolute zero of the scale; pinned at 0 Elo forever |
+| `greedy` | the 1-ply heuristic of `search/evaluators.py::greedy_action` | the "sane beginner" line — gate **G2** requires ≥95% for it against `random` in every mode |
+| `mcts40` | NN-free PUCT, 40 sims, greedy rollouts | a search that is *deliberately too small* — the bottom of the search curve |
+| `mcts160` | the same at 160 sims | the working reference: gates G5/G6 are quoted against a mid-ladder MCTS anchor |
+| `mcts640` | the same at 640 sims | the top rung; a strong net must beat it decisively before deployment |
+
+The three MCTS rungs share one frozen `SearchConfig` and differ **only** in
+`sims` (no Dirichlet noise, no forced playouts, argmax move selection), so they
+form an absolute, monotone strength curve. **Never retune them** — a changed
+anchor silently invalidates every historical Elo number, which is exactly how
+the projects surveyed in `docs/research/judges.md` ended up unable to say
+whether they had improved.
+
+### Gates (`docs/AI_DESIGN.md` §2), and which command checks them
+
+| gate | requirement | how to check |
+| --- | --- | --- |
+| **G1** encoder | rotation equivariance on 100k states; ≥100k encodes/s/core | `pytest splendor_ai/tests/test_encode.py test_symmetry.py` |
+| **G2** search | NN-free MCTS@400 ≥75% vs `greedy` (2p); `greedy` ≥95% vs `random` in every mode | `SPLENDOR_G2_MCTS=1 pytest splendor_ai/tests/test_bots.py`, or `--bots greedy random mcts400 --modes …` |
+| **G3** smoke | `train.py --smoke` reaches ≥80% vs `random` and >55% vs `greedy` with search in ~20 min CPU | arena with `--bots random greedy search:runs/smoke/weights/latest.pt:100 --modes ind2` |
+| **G4** throughput | ≥400k sims/s node-wide, ≥250k evals/s per inference GPU, clean resume | the first `nscc_train.pbs` job (see below) |
+| **G5** learning | generation 10 ≥85% vs the MCTS anchor in 2p, monotone anchored Elo | `nscc_eval.pbs` per milestone; compare `reports/arena_gen_*.md` |
+| **G6** deployment | ≥500 games through a local Node server, zero rejected actions/timeouts | the worker, after `export` |
+
+Elo is only ever quoted **against the fixed ladder**, never against the
+previous generation.
+
+### NSCC workflow, step by step
+
+ASPIRE 2A `ai` queue: 4× A100-40G per node, 16 cores + 124 GB allocated per
+GPU, 24 h maximum walltime — hence the chained, resumable training job.
+
+**1 — set up (login node, once).**
+
+```bash
+git clone <this repo> && cd <repo>
+bash splendor_ai/scripts/nscc_setup.sh          # conda env + wheels + pytest
+```
+
+Creates the `splendor` conda environment (override with `ENV_NAME=…`),
+installs `splendor_ai/requirements.txt` — on Linux the PyPI torch wheel *is*
+the CUDA build, so no `module load cuda` — runs the test suite, and runs the
+Node cross-validation if a Node module exists (skipped gracefully if not).
+
+**2 — first throughput job (gate G4).** One hour, no chaining, to measure
+sims/s and prove that resume works:
+
+```bash
+qsub -l walltime=01:00:00 -v CHAIN=0,MAX_CHAIN=0 splendor_ai/scripts/nscc_train.pbs
+qstat -answ1 $USER                    # watch it
+tail -f runs/nscc/logs/train.*.log    # its log
+```
+
+Check in the log: 4 GPUs visible, `OMP_NUM_THREADS=1`, sims/s ≥ 400k
+node-wide, and a `runs/nscc/weights/latest.pt` at the end.
+
+**3 — chained training.** Submit once; each job runs ~23 h, checkpoints, and
+`qsub`s itself:
+
+```bash
+qsub splendor_ai/scripts/nscc_train.pbs
+```
+
+The job requests `select=1:ngpus=4:ncpus=64:mem=440gb`, resumes
+`runs/nscc` if it exists, and re-submits unless (a) a `STOP` file exists in the
+repository root, (b) `CHAIN` reached `MAX_CHAIN` (default 30), or (c) the
+trainer exited with a real error — a failure never re-queues itself. To stop
+the chain: `touch STOP` (the current job finishes normally). Override anything
+with `qsub -v RUN_DIR=runs/exp2,CONFIG=…/other.yaml`.
+
+**4 — evaluate a checkpoint.** One GPU, 16 cores, all five modes against the
+full ladder:
+
+```bash
+qsub splendor_ai/scripts/nscc_eval.pbs                                   # latest
+qsub -v CKPT=runs/nscc/checkpoints/gen_0040.pt,GAMES=400 \
+     splendor_ai/scripts/nscc_eval.pbs                                   # milestone
+```
+
+Writes `reports/arena_<ckpt>_<jobid>.{md,json}` and echoes the Elo block into
+the job log. Run it every few generations and plot the anchored Elo: it must
+climb against the *fixed* ladder (G5), not against the previous generation.
+
+**5 — export the champion.**
+
+```bash
+python -m splendor_ai.export --ckpt runs/nscc/checkpoints/gen_0040.pt \
+    --out dist/model --modes all --elo reports/arena_gen_0040_1234.json
+```
+
+(or add `EXPORT=1` to the eval job's `-v` list and it does this for you). The
+bundle contains:
+
+| file | purpose |
+| --- | --- |
+| `shared.pt` | the checkpoint the worker loads, re-saved through `save_checkpoint` so its `obs_version`/`action_version` match this build |
+| `ind2.pt … team.pt` | byte-identical copies for the worker's per-mode lookup (the hook for per-mode specialists) |
+| `manifest.json` | provenance: source checkpoint + SHA-256, generation/step, net config, parameter count, obs/action versions, the Elo table, and a SHA-256 per file |
+| `shared.ts` | a TorchScript trace, verified against eager and **skipped with a warning** if tracing fails — the worker loads the `.pt`, not this |
+
+**6 — copy to the Windows worker.**
+
+```bash
+# from the NSCC login node
+scp dist/model/shared.pt   you@windows-box:C:/splendor/models/
+scp dist/model/manifest.json you@windows-box:C:/splendor/models/
+```
+
+The worker reads `MODEL_DIR/<mode>.pt` first and `MODEL_DIR/shared.pt` as the
+fallback (`worker/config.py::checkpoint_candidates`), so a single `shared.pt`
+in `MODEL_DIR` is enough for all five modes; drop the per-mode files in beside
+it only when you actually ship specialists. Set `MODEL_DIR` in the worker's
+`.env`, start `run_worker.bat`, and confirm the loaded generation in its first
+log line. `load_checkpoint` refuses a checkpoint built against a different
+`obs_version` with a `RuntimeError` naming the mismatch, so a stale model
+fails loudly at startup instead of playing garbage.
+
+**Housekeeping.** `runs/` and `reports/` grow: keep `metrics.jsonl`, the
+milestone checkpoints (gen 5/10/20/40/80 — the ladder's pinned historical
+anchors) and every arena report; the rest can be pruned. Keep the reports —
+they are the only record of what the strength claims were measured against.

@@ -1,0 +1,166 @@
+#!/bin/bash
+# =============================================================================
+# splendor_ai — arena evaluation of a checkpoint against the pinned anchor
+#                ladder, in every mode, on ONE GPU of an ASPIRE 2A ai node.
+#
+# Submit it with:
+#     qsub splendor_ai/scripts/nscc_eval.pbs                    # latest weights
+#     qsub -v CKPT=runs/nscc/checkpoints/gen_0040.pt \
+#          splendor_ai/scripts/nscc_eval.pbs                    # a milestone
+#     qsub -v GAMES=400,SIMS=800,EXPORT=1 splendor_ai/scripts/nscc_eval.pbs
+#
+# Output: reports/arena_<tag>.md and .json (plus dist/model/ if EXPORT=1).
+#
+# WHY A SEPARATE JOB: evaluation is CPU-heavy (the NN-free MCTS anchors are
+# pure Python) and needs only one GPU for the network bots, so it runs
+# alongside training on a second, smaller allocation instead of stealing the
+# training node.  Reserve roughly 10% of your node hours for it — a strength
+# number nobody measured is not a strength number (docs/research/judges.md).
+# =============================================================================
+
+#PBS -q ai
+#      ^ same GPU queue; we just ask for a quarter of a node.
+
+#PBS -l select=1:ngpus=1:ncpus=16:mem=124gb
+#      ^ 1 GPU with its 16 cores / 124 GB share.  The 16 cores are the point:
+#        --workers below spends them on parallel games.
+
+#PBS -l walltime=11:59:00
+#      ^ under half a day.  See the budget arithmetic in section 5.
+
+#PBS -N splendor-eval
+#PBS -j oe
+#      ^ one joined log file, splendor-eval.oNNNNNN, in the submission dir.
+
+## #PBS -P personal-<nusnetid>
+#      ^ uncomment and fill in your NSCC project code (or pass -P to qsub).
+
+set -uo pipefail
+
+# --- 1. where to run --------------------------------------------------------
+cd "${PBS_O_WORKDIR:-$PWD}" || exit 1
+REPO_ROOT="$PWD"
+
+RUN_DIR="${RUN_DIR:-runs/nscc}"
+CKPT="${CKPT:-${RUN_DIR}/weights/latest.pt}"     # what we are rating
+GAMES="${GAMES:-120}"                            # games per pairing per mode
+SIMS="${SIMS:-400}"                              # search budget for the net bot
+MODES="${MODES:-ind2 ind3 ind4 ovt team}"
+WORKERS="${WORKERS:-16}"                         # = ncpus above
+SEED="${SEED:-20260902}"
+BOOTSTRAP="${BOOTSTRAP:-1000}"                   # resamples for the 95% CIs
+DEVICE="${DEVICE:-cuda}"
+EXPORT="${EXPORT:-0}"                            # 1 = also write dist/model/
+ENV_NAME="${ENV_NAME:-splendor}"
+REPORT_DIR="${REPORT_DIR:-reports}"
+LOG_DIR="${RUN_DIR}/logs"
+
+mkdir -p "${REPORT_DIR}" "${LOG_DIR}"
+JOB_TAG="${PBS_JOBID:-local.$(date +%Y%m%d-%H%M%S)}"
+# A readable tag: the checkpoint's own name plus the job id.
+CKPT_TAG="$(basename "${CKPT}" .pt)"
+REPORT="${REPORT_DIR}/arena_${CKPT_TAG}_${JOB_TAG%%.*}.md"
+LOG_FILE="${LOG_DIR}/eval.${JOB_TAG}.log"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+echo "=== splendor-eval =========================================="
+echo "job        : ${JOB_TAG}"
+echo "node       : $(hostname)"
+echo "checkpoint : ${CKPT}"
+echo "modes      : ${MODES}"
+echo "games/pair : ${GAMES}   workers: ${WORKERS}   net sims: ${SIMS}"
+echo "report     : ${REPORT}"
+echo "started    : $(date -Is)"
+
+# --- 2. software environment (identical to the training job) ----------------
+if ! command -v module >/dev/null 2>&1; then
+    for candidate in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        # shellcheck disable=SC1090
+        [ -r "${candidate}" ] && . "${candidate}" && break
+    done
+fi
+if command -v module >/dev/null 2>&1; then
+    module load anaconda 2>/dev/null || module load anaconda3 2>/dev/null \
+        || module load miniforge3 2>/dev/null || true
+fi
+if command -v conda >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$(conda info --base)/etc/profile.d/conda.sh"
+    conda activate "${ENV_NAME}" || { echo "cannot activate ${ENV_NAME}"; exit 1; }
+fi
+
+# One BLAS thread per process — the arena's parallelism is one process per
+# game (`--workers`), and nested thread pools would just fight for the cores.
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+echo "python     : $(command -v python) — $(python -V 2>&1)"
+nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader \
+    || echo "(no nvidia-smi — the net bots will fall back to CPU)"
+
+# --- 3. is there anything to rate? ------------------------------------------
+if [ ! -f "${CKPT}" ]; then
+    echo "ERROR: no checkpoint at ${CKPT}."
+    echo "       Pass one:  qsub -v CKPT=runs/nscc/checkpoints/gen_0040.pt ..."
+    exit 2
+fi
+
+# --- 4. the anchor ladder + the checkpoint ----------------------------------
+# The five anchors are frozen in splendor_ai/anchors.py and must never be
+# retuned — every historical Elo number is quoted against them.  Two bots are
+# built from the checkpoint so the report separates *weights* from *search*:
+#   net:<ckpt>            policy head only, no search
+#   search:<ckpt>:<sims>  the same weights inside the MCTS
+# (that difference is the "same-weights search ablation" of §4.)
+BOTS="random greedy mcts40 mcts160 mcts640"
+BOTS="${BOTS} net=net:${CKPT} search=search:${CKPT}:${SIMS}"
+
+# --- 5. run the arena -------------------------------------------------------
+# Budget arithmetic before you raise --games: with 7 bots there are 21 pairings
+# per mode, 5 modes, and a game costs from milliseconds (random/greedy) to
+# ~1 min (mcts640 at 4p).  120 games per pairing is roughly 6-9 h on 16 cores.
+# The judges' rule is >=400 paired games per pairing before any *promotion*
+# decision — do that with a trimmed --bots list (e.g. only the champion, the
+# challenger and mcts160), not with the whole ladder at once.
+echo "--- arena"
+python -m splendor_ai.arena \
+    --bots ${BOTS} \
+    --modes ${MODES} \
+    --games "${GAMES}" \
+    --workers "${WORKERS}" \
+    --seed "${SEED}" \
+    --bootstrap "${BOOTSTRAP}" \
+    --device "${DEVICE}" \
+    --anchor random \
+    --out "${REPORT}"
+STATUS=$?
+echo "--- arena exited with status ${STATUS}"
+
+REPORT_JSON="${REPORT%.md}.json"
+if [ "${STATUS}" -eq 0 ] && [ -f "${REPORT}" ]; then
+    echo "--- Elo table (also in ${REPORT})"
+    # Print the ratings block of the markdown report into the job log, so the
+    # numbers are in the log even if the file is moved later.
+    sed -n '/^## Elo/,/^## /p' "${REPORT}" | head -n 40
+fi
+
+# --- 6. optional: package the checkpoint for the deployment worker ----------
+# Only if the arena succeeded; the Elo table from this very report is embedded
+# in the bundle's metadata, so a deployed shared.pt can always answer "how
+# strong was this, measured against what".
+if [ "${EXPORT}" = "1" ] && [ "${STATUS}" -eq 0 ]; then
+    echo "--- exporting deployment bundle"
+    python -m splendor_ai.export \
+        --ckpt "${CKPT}" \
+        --out "dist/model_${CKPT_TAG}" \
+        --modes all \
+        --elo "${REPORT_JSON}" \
+        --notes "arena ${JOB_TAG}, ${GAMES} games/pairing"
+    echo "    copy dist/model_${CKPT_TAG}/shared.pt to the worker's MODEL_DIR"
+fi
+
+echo "finished   : $(date -Is)"
+echo "log        : ${LOG_FILE}"
+exit ${STATUS}

@@ -1,8 +1,37 @@
-# splendor_ai — rules engine, validation harness, encoder/network stack.
+# splendor_ai — rules engine, validation harness, encoder/network stack,
+# self-play trainer, arena and deployment worker.
 #
-# torch: install the CPU-only wheel where there is no GPU
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r splendor_ai/requirements.txt
+#
+# CUDA WHEELS
+# -----------
+# On Linux the default PyPI torch wheel already ships the CUDA runtime
+# (cuDNN/cuBLAS are bundled inside it), so on NSCC ASPIRE 2A the plain
+# `pip install torch` below IS the GPU build — do not add an index URL and do
+# not `module load cuda`; the wheel only needs the host NVIDIA driver.
+# Two cases need an explicit index instead:
+#
+#   CPU-only box (this sandbox, a laptop):
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   a driver too old for the default wheel's CUDA (check `nvidia-smi`):
+#     pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# The Windows deployment worker (RTX 3060) uses the ordinary CUDA wheel:
+#     pip install torch --index-url https://download.pytorch.org/whl/cu124
+
 numpy>=1.26
 torch>=2.2
 pyyaml>=6.0
 pytest>=8.0
+
+# Optional — the self-play trainer writes metrics to runs/<run>/metrics.jsonl
+# regardless and only mirrors them into TensorBoard when this import succeeds
+# (docs/AI_DESIGN.md §1.8).  Drop this line for a minimal install; nothing in
+# the engine, the arena or the worker imports it.
+tensorboard>=2.16
+
+# Optional — the deployment worker reads its .env with python-dotenv when it
+# is present and falls back to a built-in KEY=VALUE reader when it is not
+# (splendor_ai/worker/config.py), so it is not required here.  The worker's
+# socket.io client is installed on the Windows box only:
+#   pip install "python-socketio[client]" python-dotenv

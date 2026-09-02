@@ -1,0 +1,100 @@
+# G3 smoke gate (docs/AI_DESIGN.md §2): the whole trainer on 4 CPU cores in
+# ~20-25 minutes.  This is the single most important verification in the
+# project: if the loop learns here, the value-target signs, the seat rotation,
+# the masks and the schedule are all wired correctly.
+#
+#   bash splendor_ai/scripts/smoke_cpu.sh              # or:
+#   python -m splendor_ai.selfplay.train --config splendor_ai/configs/smoke_cpu.yaml
+#
+# NOTE: `selfplay.win_threshold: 8` is a SMOKE-ONLY shortcut (§4 "reduced-
+# threshold smoke matrix").  It shortens INDIVIDUAL games from ~60 to ~50
+# plies and makes the credit assignment shallow enough to learn in minutes.
+# It is an engine-config override on the state only; the encoder still
+# normalises its "threshold progress" features against 15, so a net trained
+# here is NOT a deployment artefact.  Never set it for a real run.
+run_dir: runs/smoke_cpu
+seed: 7
+
+net:
+  width: 128
+  blocks: 2
+
+search_full:                 # recorded, noisy, 25% of moves (PCR)
+  sims: 48
+  universes: 2
+  noise: true
+  dirichlet_alpha_scale: 10.0
+  noise_eps: 0.25
+  forced_playouts_k: 2.0
+  prune_policy_target: true
+  c_puct: 1.5
+  max_depth: 120
+
+search_fast:                 # not recorded, no noise, 75% of moves
+  sims: 12
+  universes: 2
+  noise: false
+  forced_playouts_k: 0.0
+  prune_policy_target: false
+  c_puct: 1.5
+  max_depth: 120
+
+selfplay:
+  actors: 2
+  games_per_actor: 8
+  pcr_full_prob: 0.25
+  temperature_plies: 12
+  temperature: 1.0
+  max_plies: 400
+  win_threshold: 8           # SMOKE ONLY — see the note above
+  augment_rotations: 5       # full C5 colour group
+  mode_mixture: {ind2: 1.0}
+  mixed_game_frac: 0.15
+  opponent_weights: {latest: 0.0, historical: 0.5, anchor: 0.5}
+  historical_pool_size: 6
+  historical_cache: 2
+  stats_every_s: 15.0
+  weight_refresh_s: 10.0
+
+replay:
+  window_start: 4
+  window_end: 12
+  window_ramp_generations: 10
+  max_samples: 400000
+  min_samples: 4096
+
+learner:
+  algorithm: az
+  device: cpu
+  batch: 256
+  lr: 1.0e-3                 # small net, short run: the production 2e-4 would
+  lr_final: 1.0e-4           # not move far enough in 8k steps
+  warmup_steps: 200
+  cosine_steps: 9000
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  replay_ratio: 6.0
+  publish_every: 40
+  checkpoint_every_s: 300.0
+  bf16: false
+  value_blend: 0.0
+  log_every: 25
+
+inference:
+  mode: inproc               # CPU evaluator inside each actor
+  devices: [cpu]
+
+eval:
+  enabled: true
+  every_generations: 1
+  pairs: 25                  # 50 games vs each of random and greedy
+  search_pairs: 8            # 16 games for SearchBot@sims_eval
+  sims_eval: 48
+  opponents: [random, greedy]
+  search_bot: true
+  async_process: true
+
+games_per_generation: 600
+max_seconds: 1260            # ~21 minutes of self-play + a final evaluation
+torch_threads: 1
+learner_threads: 1

@@ -1,0 +1,121 @@
+# Production layout for one NSCC `ai`-queue node: 4x A100-40GB + 64 CPU cores
+# (docs/AI_DESIGN.md §0/§1.8, docs/research/judges.md "training_plan_4xA100").
+#
+#   GPU 0     learner, bf16 autocast, no DDP (a ~13M-parameter MLP is >15x
+#             oversupplied by one A100; the DDP branch exists for >40M nets)
+#   GPU 1-3   three inference servers, batch <= 1024, coalescing window 1 ms
+#   CPU       56 actor processes x 24 concurrent games = 1,344 games in flight,
+#             leaving ~8 cores for the learner, the servers and the OS
+#
+# Every number here is overridable, e.g.
+#   --set selfplay.actors=48 --set search_full.sims=800 --set learner.batch=8192
+run_dir: runs/nscc0
+seed: 20260902
+
+net:
+  width: 768
+  blocks: 10                 # ~12.6M parameters
+
+search_full:                 # 25% of moves, recorded
+  sims: 600
+  universes: 6
+  noise: true
+  dirichlet_alpha_scale: 10.0
+  noise_eps: 0.25
+  forced_playouts_k: 2.0
+  prune_policy_target: true
+  c_puct: 1.5
+  fpu_reduction: 0.25
+  root: puct                 # 'gumbel' is the documented A/B (§4)
+  gumbel_m: 16
+  deck_reserve_penalty: [0.02, 0.06, 0.12]
+  max_depth: 200
+
+search_fast:                 # 75% of moves, not recorded
+  sims: 120
+  universes: 6
+  noise: false
+  forced_playouts_k: 0.0
+  prune_policy_target: false
+  c_puct: 1.5
+  max_depth: 200
+
+selfplay:
+  actors: 56
+  games_per_actor: 24
+  pcr_full_prob: 0.25
+  temperature_plies: 12
+  temperature: 1.0
+  max_plies: 400
+  truncation_z_weight: 0.3
+  win_threshold: null        # the real rules; NEVER override for a real run
+  augment_rotations: 5
+  mixed_game_frac: 0.25
+  opponent_weights: {latest: 0.0, historical: 0.6, anchor: 0.4}
+  historical_pool_size: 16
+  historical_cache: 3
+  stats_every_s: 30.0
+  weight_refresh_s: 60.0
+  ship_every_games: 4
+  # Curriculum (§1.8): 2p-only at reduced search for the first 300k games,
+  # then the five-mode mixture.
+  mode_mixture: {ind2: 0.25, ind3: 0.15, ind4: 0.15, ovt: 0.20, team_adj: 0.15, team_opp: 0.10}
+  phases:
+    - until_games: 50000     # h0-h1 warm-up: cheap search, 2p only
+      mixture: {ind2: 1.0}
+      sims_full: 150
+      sims_fast: 40
+    - until_games: 300000    # full budgets, still 2p only
+      mixture: {ind2: 1.0}
+    - until_games: 1000000   # ramp to the mixture
+      mixture: {ind2: 0.40, ind3: 0.15, ind4: 0.15, ovt: 0.15, team_adj: 0.10, team_opp: 0.05}
+    - until_games: null      # steady state
+      mixture: {ind2: 0.25, ind3: 0.15, ind4: 0.15, ovt: 0.20, team_adj: 0.15, team_opp: 0.10}
+
+replay:
+  window_start: 4
+  window_end: 20
+  window_ramp_generations: 40
+  max_samples: 20000000      # ~8 GB at 414 B/record
+  min_samples: 200000
+
+learner:
+  algorithm: az              # switch to `ppo` for the fallback learner
+  device: cuda:0
+  batch: 4096
+  lr: 2.0e-4
+  lr_final: 2.0e-5
+  warmup_steps: 2000
+  cosine_steps: 400000
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  replay_ratio: 5.0          # judges.md: target 4-8x sample reuse
+  publish_every: 200         # ~2 min at ~1.5 steps/s
+  checkpoint_every_s: 600.0
+  bf16: true
+  value_blend: 0.5           # 0.5*root Q + 0.5*outcome (judges.md)
+  log_every: 50
+  ddp: true                  # only engages when WORLD_SIZE > 1
+
+inference:
+  mode: server
+  devices: [cuda:1, cuda:2, cuda:3]
+  max_batch: 1024
+  max_wait_ms: 1.0
+  reload_every_s: 60.0
+  queue_size: 512
+
+eval:
+  enabled: true
+  every_generations: 5
+  pairs: 100
+  search_pairs: 25
+  sims_eval: 400
+  opponents: [random, greedy]
+  search_bot: true
+  async_process: true
+
+games_per_generation: 20000
+max_seconds: 424800          # 118 h, inside a 120 h PBS wall clock
+torch_threads: 1
+learner_threads: 8

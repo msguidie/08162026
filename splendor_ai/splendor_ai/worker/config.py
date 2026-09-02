@@ -15,7 +15,7 @@ Nothing here imports torch, so ``--help`` and the unit tests stay instant.
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Tuple
 
@@ -59,17 +59,19 @@ def mode_key(game_mode: Optional[str], num_players: Optional[int]) -> str:
 # ── .env ──────────────────────────────────────────────────────────────────
 
 def find_env_file(explicit: Optional[str] = None) -> Optional[Path]:
-    """First existing candidate of ``explicit`` / ``$SPLENDOR_WORKER_ENV`` /
-    ``./.env`` / ``<project>/.env``."""
-    candidates: List[Path] = []
-    if explicit:
-        candidates.append(Path(explicit))
-    from_env = os.environ.get("SPLENDOR_WORKER_ENV")
-    if from_env:
-        candidates.append(Path(from_env))
-    candidates.append(Path.cwd() / ".env")
-    candidates.append(PROJECT_DIR / ".env")
-    for path in candidates:
+    """Which ``.env`` to read, or ``None``.
+
+    An explicit pointer — ``--env`` or ``$SPLENDOR_WORKER_ENV``, which is what
+    ``run_worker.bat`` sets — is *authoritative*: if it names a file that does
+    not exist, no ``.env`` is read at all.  That keeps a launcher (and the
+    e2e test) from silently picking up a stray file.  With no pointer the
+    search is ``./.env`` then ``<project>/.env``.
+    """
+    pointer = explicit or os.environ.get("SPLENDOR_WORKER_ENV")
+    if pointer:
+        path = Path(pointer)
+        return path if path.is_file() else None
+    for path in (Path.cwd() / ".env", PROJECT_DIR / ".env"):
         if path.is_file():
             return path
     return None

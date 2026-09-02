@@ -1,0 +1,210 @@
+#!/bin/bash
+# =============================================================================
+# splendor_ai — self-play training on one NSCC ASPIRE 2A "ai" node
+#                (4x A100-40GB, 64 cores, 440 GB), as a SELF-CHAINING job.
+#
+# Submit it with:      qsub splendor_ai/scripts/nscc_train.pbs
+# Watch it with:       qstat -answ1 $USER
+# Stop the chain with: touch STOP            (in the repository root)
+#
+# HOW THIS WORKS IF YOU HAVE NEVER USED PBS
+# -----------------------------------------
+# PBS Pro is a batch scheduler.  `qsub` hands it this file; it waits until a
+# matching node is free, then runs the file as a normal bash script on that
+# node.  The `#PBS` lines below are NOT comments to PBS — they are the job's
+# resource request, and they must come before the first real command.
+# The maximum walltime on the ai queue is 24 h, which is shorter than this
+# training run, so the job saves a checkpoint, exits, and submits *itself*
+# again — the "chain".  Each link resumes from the previous one's checkpoint.
+# =============================================================================
+
+#PBS -q ai
+#      ^ queue.  'ai' is the GPU queue on ASPIRE 2A (4x A100-40G per node).
+
+#PBS -l select=1:ngpus=4:ncpus=64:mem=440gb
+#      ^ resources: 1 "chunk" (= 1 node) with 4 GPUs, 64 CPU cores and 440 GB
+#        of RAM.  The queue allocates 16 cores + 124 GB per GPU, so 4 GPUs is
+#        the whole node: 64 cores / ~440 GB (a little under 4x124 leaves the
+#        scheduler headroom).  Asking for less than a whole node here would
+#        strand cores the CPU actors need.
+
+#PBS -l walltime=23:59:00
+#      ^ hard wall-clock limit.  PBS kills the job at this point, checkpoint or
+#        not — which is why the training command below gets a slightly shorter
+#        self-imposed timeout and exits cleanly on its own.
+
+#PBS -N splendor-train
+#      ^ job name shown by qstat.
+
+#PBS -j oe
+#      ^ join stderr into stdout, so there is ONE log file per job
+#        (splendor-train.oNNNNNN in the submission directory).
+
+## #PBS -P personal-<nusnetid>
+#      ^ project/account to charge.  NSCC requires one; uncomment and fill in
+#        yours (or pass it on the command line: qsub -P personal-abc123 ...).
+#        Left commented so the script also works on sites without accounting.
+
+## #PBS -M you@example.com
+## #PBS -m abe
+#      ^ optional email on (a)bort, (b)egin, (e)nd.
+
+set -uo pipefail
+# NOTE: deliberately *not* `set -e`.  If training exits non-zero we still want
+# to reach the bookkeeping and the decision about re-submitting.
+
+# --- 1. where to run --------------------------------------------------------
+# PBS starts every job in your $HOME.  $PBS_O_WORKDIR is the directory you ran
+# `qsub` from — the repository root, by convention for this project.
+cd "${PBS_O_WORKDIR:-$PWD}" || exit 1
+REPO_ROOT="$PWD"
+
+RUN_DIR="${RUN_DIR:-runs/nscc}"                 # trainer's run directory
+CONFIG="${CONFIG:-splendor_ai/configs/nscc_4xa100.yaml}"
+LOG_DIR="${RUN_DIR}/logs"
+STOP_FILE="${STOP_FILE:-${REPO_ROOT}/STOP}"
+ENV_NAME="${ENV_NAME:-splendor}"
+# Chain bookkeeping: CHAIN counts the links so far, MAX_CHAIN caps them so a
+# broken run cannot resubmit itself forever.  Both are passed to the next job
+# with `qsub -v` at the bottom.  CHAIN=0,MAX_CHAIN=0 = "run once, no chaining".
+CHAIN="${CHAIN:-0}"
+MAX_CHAIN="${MAX_CHAIN:-30}"
+# Leave the trainer 20 minutes to finish its last checkpoint before PBS's axe.
+TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-23h}"
+
+mkdir -p "${LOG_DIR}"
+JOB_TAG="${PBS_JOBID:-local.$(date +%Y%m%d-%H%M%S)}"
+LOG_FILE="${LOG_DIR}/train.${JOB_TAG}.log"
+
+# Everything printed from here on goes to the terminal *and* to the log file.
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+echo "=== splendor-train ========================================="
+echo "job        : ${JOB_TAG}   chain link ${CHAIN}/${MAX_CHAIN}"
+echo "node       : $(hostname)"
+echo "workdir    : ${REPO_ROOT}"
+echo "run dir    : ${RUN_DIR}"
+echo "config     : ${CONFIG}"
+echo "started    : $(date -Is)"
+
+# --- 2. software environment ------------------------------------------------
+# Same modules/conda environment `nscc_setup.sh` created on the login node.
+if ! command -v module >/dev/null 2>&1; then
+    for candidate in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        # shellcheck disable=SC1090
+        [ -r "${candidate}" ] && . "${candidate}" && break
+    done
+fi
+if command -v module >/dev/null 2>&1; then
+    module load anaconda 2>/dev/null || module load anaconda3 2>/dev/null \
+        || module load miniforge3 2>/dev/null || true
+    # CUDA itself is NOT loaded: the PyPI torch wheel bundles its own CUDA
+    # runtime and only needs the host driver, which is always present.
+fi
+if command -v conda >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    . "$(conda info --base)/etc/profile.d/conda.sh"
+    conda activate "${ENV_NAME}" || { echo "cannot activate ${ENV_NAME}"; exit 1; }
+fi
+echo "python     : $(command -v python) — $(python -V 2>&1)"
+
+# --- 3. threading and I/O ---------------------------------------------------
+# The learner is one process and there are ~56 CPU actor processes.  If each of
+# them let BLAS/OpenMP spawn its own thread pool the node would run 64x64
+# threads and thrash.  One thread per process; parallelism comes from the
+# process count, which the config sets.
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+export PYTHONUNBUFFERED=1          # logs appear while the job runs, not at exit
+export PYTHONHASHSEED=0            # reproducible dict/set iteration in workers
+export MALLOC_ARENA_MAX=2          # glibc: keep 56 forked actors from bloating
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1   # harmless single-process, needed if
+                                           # WORLD_SIZE>1 is ever switched on
+# Where torch caches its JIT/inductor artefacts — /tmp on a compute node is
+# small and shared; keep it inside the run directory.
+export TORCHINDUCTOR_CACHE_DIR="${REPO_ROOT}/${RUN_DIR}/.torch_cache"
+export TRITON_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR}/triton"
+mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
+
+echo "--- GPUs"
+nvidia-smi --query-gpu=index,name,memory.total,driver_version \
+           --format=csv,noheader || echo "(nvidia-smi unavailable)"
+echo "--- cores: $(nproc) visible"
+
+# --- 4. resume or start fresh ----------------------------------------------
+# The trainer's run directory is  runs/nscc/{weights/latest.pt,
+# checkpoints/gen_XXXX.pt, metrics.jsonl}.  If it already exists this link of
+# the chain continues it; otherwise this is generation 0.
+RESUME_ARG=""
+if [ -d "${RUN_DIR}" ]; then
+    RESUME_ARG="--resume ${RUN_DIR}"
+    echo "--- resuming ${RUN_DIR}"
+    ls -1 "${RUN_DIR}/checkpoints" 2>/dev/null | tail -n 3 | sed 's/^/      /'
+else
+    echo "--- fresh run: ${RUN_DIR} does not exist yet"
+fi
+
+if [ ! -f "${CONFIG}" ]; then
+    echo "ERROR: config ${CONFIG} not found — write it or pass CONFIG=... to qsub -v" >&2
+    exit 2
+fi
+
+# --- 5. train ---------------------------------------------------------------
+# `timeout --signal=INT` sends SIGINT (the same signal as Ctrl-C) a bit before
+# PBS's walltime, so the trainer can finish its step, flush metrics.jsonl and
+# write a checkpoint instead of being SIGKILLed mid-write.
+echo "--- starting training (self-imposed limit ${TRAIN_TIMEOUT})"
+START_TS=$(date +%s)
+timeout --signal=INT --kill-after=10m "${TRAIN_TIMEOUT}" \
+    python -m splendor_ai.selfplay.train \
+        --config "${CONFIG}" \
+        ${RESUME_ARG} \
+        --set run_dir="${RUN_DIR}" \
+        --set job_id="${JOB_TAG}"
+STATUS=$?
+END_TS=$(date +%s)
+echo "--- training exited with status ${STATUS} after $(( (END_TS - START_TS) / 60 )) min"
+
+# --- 6. a one-line summary of where the run stands --------------------------
+if [ -f "${RUN_DIR}/metrics.jsonl" ]; then
+    echo "--- last metrics line"
+    tail -n 1 "${RUN_DIR}/metrics.jsonl"
+fi
+ls -l "${RUN_DIR}/weights/latest.pt" 2>/dev/null || \
+    echo "note: no weights/latest.pt yet"
+
+# --- 7. chain the next job --------------------------------------------------
+# Exit codes: 0 = the trainer finished on its own, 124 = `timeout` stopped it
+# because the walltime was nearly up (the normal case for a long run).  Any
+# other code is a real failure and must not be re-submitted blindly — read the
+# log, fix it, and qsub again by hand.
+if [ -f "${STOP_FILE}" ]; then
+    echo "=== STOP file present (${STOP_FILE}) — not re-submitting."
+elif [ "${MAX_CHAIN}" -le 0 ] || [ "${CHAIN}" -ge "${MAX_CHAIN}" ]; then
+    echo "=== chain limit reached (${CHAIN}/${MAX_CHAIN}) — not re-submitting."
+elif [ "${STATUS}" -ne 0 ] && [ "${STATUS}" -ne 124 ]; then
+    echo "=== training failed (status ${STATUS}) — NOT re-submitting."
+    echo "    inspect ${LOG_FILE}, then: qsub splendor_ai/scripts/nscc_train.pbs"
+else
+    NEXT=$(( CHAIN + 1 ))
+    echo "=== submitting chain link ${NEXT}"
+    # -v passes variables into the next job's environment.  (The alternative
+    #  style is to submit the successor at the *start* with
+    #  `qsub -W depend=afterany:$PBS_JOBID`, which queues it while this one
+    #  runs; end-of-job submission is used here because it can look at the
+    #  exit status first.)
+    cd "${REPO_ROOT}" && qsub \
+        -v CHAIN=${NEXT},MAX_CHAIN=${MAX_CHAIN},RUN_DIR=${RUN_DIR},CONFIG=${CONFIG},ENV_NAME=${ENV_NAME} \
+        splendor_ai/scripts/nscc_train.pbs \
+        && echo "    submitted." \
+        || echo "    qsub failed — resubmit by hand."
+fi
+
+echo "finished   : $(date -Is)"
+echo "log        : ${LOG_FILE}"
+exit ${STATUS}

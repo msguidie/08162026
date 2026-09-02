@@ -1,0 +1,68 @@
+# A ~3 minute version of smoke_cpu.yaml used by the pytest marker
+# `selfplay_smoke`: it only asks whether the loop CLOSES — records arrive, the
+# buffer fills, the learner steps, weights are published, a generation is
+# sealed, an evaluation returns and checkpoint/resume restores the counters.
+# It does not ask whether anything was learned; that is smoke_cpu.yaml's job.
+run_dir: runs/smoke_short
+seed: 3
+
+net: {width: 64, blocks: 2}
+
+search_full:
+  sims: 24
+  universes: 2
+  noise: true
+  max_depth: 80
+search_fast:
+  sims: 8
+  universes: 2
+  noise: false
+  forced_playouts_k: 0.0
+  prune_policy_target: false
+  max_depth: 80
+
+selfplay:
+  actors: 2
+  games_per_actor: 6
+  pcr_full_prob: 0.35
+  temperature_plies: 8
+  max_plies: 200
+  win_threshold: 5
+  augment_rotations: 2
+  mode_mixture: {ind2: 1.0}
+  mixed_game_frac: 0.0
+  stats_every_s: 5.0
+  weight_refresh_s: 5.0
+
+replay:
+  window_start: 2
+  window_end: 4
+  window_ramp_generations: 4
+  max_samples: 60000
+  min_samples: 256
+
+learner:
+  device: cpu
+  batch: 128
+  lr: 1.0e-3
+  warmup_steps: 20
+  cosine_steps: 2000
+  replay_ratio: 6.0
+  publish_every: 10
+  checkpoint_every_s: 45.0
+  bf16: false
+  log_every: 10
+
+inference: {mode: inproc, devices: [cpu]}
+
+eval:
+  enabled: true
+  every_generations: 1
+  pairs: 2
+  search_pairs: 1
+  sims_eval: 16
+  async_process: true
+
+games_per_generation: 40
+max_seconds: 150
+torch_threads: 1
