@@ -138,12 +138,17 @@ function teamOutcome(game: ReplayIndexEntry): string | null {
 /** Seats to star: individual winners, or every member of a winning team. */
 function winnerSeats(game: ReplayIndexEntry): Set<number> {
   const seats = new Set<number>();
-  if (game.winningTeamIds?.length) {
-    // The index entry has no per-seat team ids; 1v2 seats solo at 0, 2v2 alternates or pairs.
-    // Fall back to the explicit winners list when the server provides one.
-    if (game.winners?.length) for (const seat of game.winners) seats.add(seat);
+  if (game.winners?.length) {
+    for (const seat of game.winners) seats.add(seat);
     return seats;
   }
-  for (const seat of game.winners ?? []) seats.add(seat);
+  // Team modes leave `winners` null, so map the winning side onto seats
+  // through the per-seat team ids the index entry carries.
+  if (game.winningTeamIds?.length && game.teams) {
+    const winningTeams = new Set<number>(game.winningTeamIds);
+    game.teams.forEach((team, seat) => {
+      if (team != null && winningTeams.has(team)) seats.add(seat);
+    });
+  }
   return seats;
 }

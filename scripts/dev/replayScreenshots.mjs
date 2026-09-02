@@ -84,18 +84,26 @@ document.head.appendChild(Object.assign(document.createElement('style'), { textC
 
 // Leftovers from an interrupted run would hold the ports.
 spawnSync('pkill', ['-f', 'mockReplayServer.mjs']);
-spawnSync('pkill', ['-f', `vite --port ${VITE_PORT}`]);
+spawnSync('pkill', ['-f', `vite(\\.js)? --port ${VITE_PORT}`]); // npx-style and direct-binary leftovers
 
 const children = [];
 function killChildren() {
-  for (const child of children) { try { child.kill('SIGTERM'); } catch {} }
+  for (const child of children) {
+    // Spawned detached, so the whole process group goes (vite's esbuild helper included).
+    try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
+  }
 }
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { killChildren(); process.exit(1); });
 for (const fatal of ['uncaughtException', 'unhandledRejection']) {
   process.on(fatal, err => { console.error(err); killChildren(); process.exit(1); });
 }
 function run(command, args, options = {}) {
-  const child = spawn(command, args, { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], ...options });
+  const child = spawn(command, args, {
+    cwd: repoRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true, // own process group, so killChildren() takes the children down too
+    ...options,
+  });
   children.push(child);
   child.stdout.on('data', d => process.stdout.write(`[${options.label ?? command}] ${d}`));
   child.stderr.on('data', d => process.stderr.write(`[${options.label ?? command}] ${d}`));
@@ -125,7 +133,11 @@ if (REAL_SERVER_URL) {
   await waitForHttp(`http://localhost:${MOCK_PORT}/health`, 90000);
 }
 
-run('npx', ['vite', '--port', String(VITE_PORT), '--strictPort'], {
+// Spawn vite's own binary rather than `npx vite`: npx is only a wrapper, and killing it
+// would leave the real vite process (and the port) behind.
+const viteBin = join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
+if (!existsSync(viteBin)) throw new Error(`vite is not installed at ${viteBin} — run npm install`);
+run(process.execPath, [viteBin, '--port', String(VITE_PORT), '--strictPort'], {
   label: 'vite',
   env: { ...process.env, VITE_SERVER_URL: API_URL },
 });

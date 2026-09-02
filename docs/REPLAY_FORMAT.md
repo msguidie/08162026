@@ -49,10 +49,14 @@ Anything derivable is NOT stored (gold taken on reserve, auto-claimed nobles, de
 
 `replays/index.json`:
 ```jsonc
-{ "v": 1, "games": [ { "id": "...", "t": 1725280000000, "e": 1725281800000, "mode": "INDIVIDUAL", "n": 3,
-  "players": ["alice", "bob", "carol"], "ai": [false,false,true], "winners": [0], "winningTeamIds": null, "turns": 57 } ] }
+{ "v": 1, "games": [ { "id": "...", "t": 1725280000000, "e": 1725281800000, "mode": "INDIVIDUAL",
+  "layout": null,                                  // null | "ADJACENT" | "OPPOSITE" (TEAM only)
+  "n": 3, "players": ["alice", "bob", "carol"], "ai": [false,false,true],
+  "teams": [null, null, null],                     // per-seat teamId (0 | 1), null in INDIVIDUAL
+  "winners": [0], "winningTeamIds": null, "turns": 57 } ] }
 ```
-Newest first. Written with GitHub Contents API (read sha → PUT; on 409/422 conflict re-read and retry up to 3×).
+Newest first. `winners` is null in team modes, so a client stars the winning side by matching
+`teams[seat]` against `winningTeamIds`. Written with GitHub Contents API (read sha → PUT; on 409/422 conflict re-read and retry up to 3×).
 
 ## 2. Recording semantics (server)
 

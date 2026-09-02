@@ -150,9 +150,11 @@ export interface ReplayIndexEntry {
   t: number;          // game start (ms)
   e: number;          // game end (ms)
   mode: GameMode;
+  layout?: TeamLayout | null;      // TEAM only, null otherwise
   n: number;
   players: string[];  // usernames, seat order
   ai?: boolean[];
+  teams?: (number | null)[];       // per-seat teamId, null in INDIVIDUAL
   winners: number[] | null;
   winningTeamIds: TeamId[] | null;
   turns: number;

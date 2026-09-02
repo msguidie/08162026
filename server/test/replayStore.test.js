@@ -82,9 +82,11 @@ async function run() {
       t: json.t,
       e: json.e,
       mode: 'INDIVIDUAL',
+      layout: null,
       n: 2,
       players: ['alice', 'bob'],
       ai: [false, false],
+      teams: [null, null],
       winners: [0],
       winningTeamIds: null,
       turns: json.actions.length,
@@ -104,6 +106,19 @@ async function run() {
     const list = await store.listGames({ limit: 200 });
     assertEqual(list.total, 100);
     assertEqual(list.games[0].id, 'game-1000000000104-r104', 'newest first');
+  });
+
+  await test('a team entry carries per-seat team ids and the layout', async () => {
+    useNoGithub();
+    store.reset();
+    const team = fixtures.clone(fixtures.teamGame);
+    store.add(team);
+    const list = await store.listGames({});
+    const entry = list.games[0];
+    assertEqual(entry.teams, [0, 1, 0, 1], 'seat → teamId, so the browser can star a winning side');
+    assertEqual(entry.layout, 'OPPOSITE');
+    assertEqual(entry.winners, null, 'team modes have no individual winners');
+    assertEqual(entry.winningTeamIds, team.result.winningTeamIds);
   });
 
   await test('paginates with limit and offset', async () => {

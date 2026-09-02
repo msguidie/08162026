@@ -326,6 +326,36 @@ async function run() {
     assertEqual(json.result.rating, [0, 5, 5]);
   });
 
+  await test('INDIVIDUAL: a resigned seat is stored with a rating delta of 0', () => {
+    // index.js applies ratings with excludeResigned when an INDIVIDUAL game ends on a
+    // resignation/timeout, so seat 2's account is never credited even though the raw
+    // ranking hands it +3. The stored replay must say the same.
+    const state = syntheticState([
+      player('a', 15, 11), player('b', 4, 3), player('c', 9, 7),
+    ], { resignedPlayers: [2] });
+    const room = makeSyntheticRoom(state, [5, 1, 3]);
+    recorder.begin(room);
+    const json = recorder.finish(room);
+    assertEqual(json.result.rating, [5, 1, 0], 'the resigned seat earns nothing');
+    assertEqual(json.result.resigned, [2]);
+    assertEqual(json.result.winners, [0], 'resigned seats are still excluded from the winners');
+  });
+
+  await test('team modes keep the rating the server credited for resigned seats', () => {
+    const state = syntheticState([
+      player('a', 12, 8, 0), player('b', 3, 2, 1), player('c', 9, 6, 0), player('d', 5, 4, 1),
+    ], {
+      gameMode: 'TEAM',
+      teamLayout: 'OPPOSITE',
+      resignedPlayers: [1],
+      gameResult: { reason: 'FORFEIT', winningTeamIds: [0] },
+    });
+    const room = makeSyntheticRoom(state, [5, 0, 5, 0]);
+    recorder.begin(room);
+    const json = recorder.finish(room);
+    assertEqual(json.result.rating, [5, 0, 5, 0], 'team ratings are per side, not per seat');
+  });
+
   await test('a missing ratingChanges falls back to zeroes instead of throwing', () => {
     const state = syntheticState([player('a', 1, 1), player('b', 2, 1)]);
     const room = makeSyntheticRoom(state, null);

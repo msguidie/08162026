@@ -101,7 +101,10 @@ export function formatReplayDate(ms: number): string {
 
 export function formatDuration(startMs: number, endMs: number): string | null {
   if (!startMs || !endMs || endMs <= startMs) return null;
-  const totalMinutes = Math.round((endMs - startMs) / 60000);
+  // Short games (bot runs, quick resignations) are seconds, not "1 min".
+  const totalSeconds = Math.round((endMs - startMs) / 1000);
+  if (totalSeconds < 60) return `${Math.max(1, totalSeconds)} s`;
+  const totalMinutes = Math.round(totalSeconds / 60);
   if (totalMinutes < 60) return `${Math.max(1, totalMinutes)} min`;
   const hours = Math.floor(totalMinutes / 60);
   return `${hours} h ${totalMinutes % 60} min`;

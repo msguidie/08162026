@@ -189,6 +189,9 @@ function buildResult(room) {
 
   // An INDIVIDUAL game that ran out of active players ended by forfeit.
   const forfeited = resigned.length >= state.numPlayers - 1 && resigned.length > 0;
+  // index.js credits accounts with `excludeResigned` when an INDIVIDUAL game ends
+  // on a resignation/timeout, so a seat that resigned never earns a delta. Store
+  // what the server actually credited instead of the raw ranking.
   return {
     scores,
     cards,
@@ -196,7 +199,7 @@ function buildResult(room) {
     winners: individualWinners(state),
     winningTeamIds: null,
     reason: forfeited ? 'FORFEIT' : 'SCORE',
-    rating: ratingChanges,
+    rating: ratingChanges.map((delta, seat) => (resigned.includes(seat) ? 0 : delta)),
   };
 }
 

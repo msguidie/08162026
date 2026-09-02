@@ -103,9 +103,13 @@ function indexEntryFor(json) {
     t: json.t ?? null,
     e: json.e ?? null,
     mode: json.mode,
+    layout: json.layout ?? null,
     n: json.n ?? (json.players || []).length,
     players: (json.players || []).map(player => player.u),
     ai: (json.players || []).map(player => player.ai === true),
+    // Per-seat team ids (null in INDIVIDUAL) so the browser can star a winning
+    // side without loading the whole replay — team modes leave `winners` null.
+    teams: (json.players || []).map(player => (player.team ?? null)),
     winners: json.result?.winners ?? null,
     winningTeamIds: json.result?.winningTeamIds ?? null,
     turns: Array.isArray(json.actions) ? json.actions.length : 0,
