@@ -5,6 +5,10 @@
 //   node scripts/dev/replayScreenshots.mjs
 //
 // Flags: --keep (leave servers running), --slow (extra settle time before each shot)
+//
+// Env: REAL_SERVER_URL=http://localhost:10012 points the page at an already-running real
+// server (server/index.js) instead of the mock — nothing is spawned for it, and the shots
+// are written under a `real-` prefix so the mock set is never overwritten.
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -19,6 +23,11 @@ const MOCK_PORT = 10011;
 const VITE_PORT = 5173;
 const BASE_URL = `http://localhost:${VITE_PORT}`;
 const settle = process.argv.includes('--slow') ? 1200 : 600;
+
+// When REAL_SERVER_URL is set the mock is not started at all and the page talks to that
+// server; everything else (vite, Tailwind shim, Playwright driving) is unchanged.
+const REAL_SERVER_URL = (process.env.REAL_SERVER_URL || '').replace(/\/$/, '') || null;
+const API_URL = REAL_SERVER_URL ?? `http://localhost:${MOCK_PORT}`;
 
 process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH || '/opt/pw-browsers';
 const { chromium } = await import('playwright');
@@ -108,12 +117,17 @@ async function waitForHttp(url, timeoutMs = 60000) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Boot servers ───────────────────────────────────────────────────────────
-run('node', [join('scripts', 'dev', 'mockReplayServer.mjs'), '--port', String(MOCK_PORT)], { label: 'mock' });
-await waitForHttp(`http://localhost:${MOCK_PORT}/health`, 90000);
+if (REAL_SERVER_URL) {
+  console.log(`  using the real server at ${REAL_SERVER_URL} (mock not started)`);
+  await waitForHttp(`${REAL_SERVER_URL}/health`, 30000);
+} else {
+  run('node', [join('scripts', 'dev', 'mockReplayServer.mjs'), '--port', String(MOCK_PORT)], { label: 'mock' });
+  await waitForHttp(`http://localhost:${MOCK_PORT}/health`, 90000);
+}
 
 run('npx', ['vite', '--port', String(VITE_PORT), '--strictPort'], {
   label: 'vite',
-  env: { ...process.env, VITE_SERVER_URL: `http://localhost:${MOCK_PORT}` },
+  env: { ...process.env, VITE_SERVER_URL: API_URL },
 });
 await waitForHttp(BASE_URL, 60000);
 
@@ -186,7 +200,7 @@ async function stepForward(page, times) {
 }
 
 // ── Mobile: login, browser, viewer ─────────────────────────────────────────
-{
+if (!REAL_SERVER_URL) {
   const { context, page } = await newPage({
     label: 'mobile',
     viewport: { width: 375, height: 812 },
@@ -211,7 +225,7 @@ async function stepForward(page, times) {
 }
 
 // ── Desktop: viewer + game over ────────────────────────────────────────────
-{
+if (!REAL_SERVER_URL) {
   const { context, page } = await newPage({
     label: 'desktop',
     viewport: { width: 1280, height: 800 },
@@ -242,7 +256,7 @@ async function stepForward(page, times) {
 }
 
 // ── Mobile game over (control bar must stay reachable) ─────────────────────
-{
+if (!REAL_SERVER_URL) {
   const { context, page } = await newPage({
     label: 'mobile-over',
     viewport: { width: 375, height: 812 },
@@ -257,6 +271,89 @@ async function stepForward(page, times) {
   await seekTo(page, Number(max));
   await shot(page, 'replay-gameover-mobile.png');
   await context.close();
+}
+
+// ── Real server: the same journey against real recorded games ──────────────
+if (REAL_SERVER_URL) {
+  const list = await (await fetch(`${REAL_SERVER_URL}/api/replays?limit=50`)).json();
+  const games = list.games ?? [];
+  console.log(`  ${games.length} replay(s) from the real server (source: ${list.source})`);
+  for (const game of games) {
+    console.log(`    ${game.id}  ${game.mode} n=${game.n} turns=${game.turns} `
+      + `winners=${JSON.stringify(game.winners)} teams=${JSON.stringify(game.winningTeamIds)} `
+      + `[${game.players.join(', ')}]`);
+  }
+  if (!games.length) throw new Error(`${REAL_SERVER_URL}/api/replays is empty — run scripts/dev/playRandomGames.mjs first`);
+
+  // Busiest individual game for the board shots, and any team game for the team shot.
+  const individual = [...games].filter(g => g.mode === 'INDIVIDUAL')
+    .sort((a, b) => (b.n - a.n) || (b.turns - a.turns))[0] ?? games[0];
+  const team = games.find(g => g.mode === 'TEAM') ?? games.find(g => g.mode === 'ONE_V_TWO') ?? games[0];
+
+  /** Rows are unique by player name, so pick by that rather than by position. */
+  async function openRow(page, game) {
+    await page.locator('button:has-text("turns")').first().waitFor({ timeout: 20000 });
+    const row = page.locator('button:has-text("turns")').filter({ hasText: game.players[0] }).first();
+    await row.waitFor({ timeout: 20000 });
+    await row.click();
+    await page.locator('.game-shell').waitFor({ timeout: 30000 });
+    await sleep(400);
+  }
+
+  async function toLastFrame(page) {
+    const max = await page.locator('input[type="range"]').first().getAttribute('max');
+    await seekTo(page, Number(max));
+    return Number(max);
+  }
+
+  // Mobile: the list, then a board mid-replay.
+  {
+    const { context, page } = await newPage({
+      label: 'real-mobile',
+      viewport: { width: 375, height: 812 },
+      deviceScaleFactor: 2,
+      isMobile: true,
+      hasTouch: true,
+    });
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Replays' }).first().waitFor({ timeout: 60000 });
+    await page.getByRole('button', { name: 'Replays' }).first().click();
+    await page.getByRole('heading', { name: 'Replays' }).waitFor();
+    await page.locator('button:has-text("turns")').first().waitFor({ timeout: 20000 });
+    await shot(page, 'real-replay-browser-mobile.png');
+
+    await openRow(page, individual);
+    await stepForward(page, 12);
+    await shot(page, 'real-replay-viewer-mobile.png');
+    await context.close();
+  }
+
+  // Desktop: board mid-replay, the Game Over summary, and a team game.
+  {
+    const { context, page } = await newPage({ label: 'real-desktop', viewport: { width: 1280, height: 800 } });
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Replays' }).first().waitFor({ timeout: 60000 });
+    await page.getByRole('button', { name: 'Replays' }).first().click();
+
+    await openRow(page, individual);
+    await stepForward(page, 14);
+    console.log(`  ${individual.id} caption at frame 14: `
+      + `${(await page.locator('.game-shell').first().innerText()).split('\n').slice(0, 2).join(' / ')}`);
+    await shot(page, 'real-replay-viewer-desktop.png');
+
+    const lastIndex = await toLastFrame(page);
+    const summary = await page.locator('div.fixed.inset-0.z-50').first().innerText();
+    console.log(`  ${individual.id} frame ${lastIndex} summary: ${JSON.stringify(summary.replace(/\n+/g, ' | '))}`);
+    await shot(page, 'real-replay-gameover-desktop.png');
+
+    await page.getByRole('button', { name: 'Exit Replay', exact: true }).click();
+    await openRow(page, team);
+    const teamLast = await toLastFrame(page);
+    const teamSummary = await page.locator('div.fixed.inset-0.z-50').first().innerText();
+    console.log(`  ${team.id} frame ${teamLast} summary: ${JSON.stringify(teamSummary.replace(/\n+/g, ' | '))}`);
+    await shot(page, 'real-replay-team-desktop.png');
+    await context.close();
+  }
 }
 
 await browser.close();
