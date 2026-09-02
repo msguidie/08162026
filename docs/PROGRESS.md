@@ -34,5 +34,5 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done · ❌ blocked
 
 ## Phase F — Docs & delivery
 - ✅ requirements.txt, requirements-worker.txt, PBS scripts, README sections; ✅ docs/DEPLOY_zh.md A–D
-- 🟨 Independent review + adversarial verification workflow (running on everything except selfplay/)
+- ✅ Independent review + adversarial verification: 23 findings → 12 confirmed → all fixed (replay id validation, aiAvailable re-broadcast, in-flight request invalidation, orphaned-noble handling, standings/winners/serialization, docs); trainer review: 29 findings, confirmed critical/high/medium being fixed (final checkpoint before eval, global curriculum counter, per-instance seeds, queue drain, PPO guard, retention, graceful SIGINT)
 - ⬜ Commit & push

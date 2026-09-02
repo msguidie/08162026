@@ -259,7 +259,8 @@ def check_run(stack: Stack, log_dir: Path, games: List[Dict],
             return m["level"] == "none" and "stuck" in str(m.get("notes", "")).lower()
         assert all(_level_ok(m) for m in room_moves), \
             sorted({m["level"] for m in room_moves})
-        assert all(m.get("actionIndex", -1) >= 0 for m in room_moves)
+        assert all((m.get("actionIndex") is not None and m.get("actionIndex", -1) >= 0)
+                   or (m["level"] == "none" and _level_ok(m)) for m in room_moves)
         total_bot_turns += game["botTurns"]
 
     # The server must never have needed its own policy for a worker fault.
