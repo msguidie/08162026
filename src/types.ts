@@ -119,6 +119,8 @@ export interface LobbyPlayer {
   ready: boolean;
   wantsFirst: boolean;
   avatarSeed: number;
+  /** AI bot seat (docs/AI_BRIDGE.md §3). Absent on servers that predate the bridge. */
+  isAI?: boolean;
 }
 
 export type TeamSeats = [
@@ -133,6 +135,8 @@ export interface LobbyState {
   teamLayout: TeamLayout;
   teamSeats: TeamSeats;
   unlimitedTime: boolean;
+  /** AI is enabled on this server and a worker is connected (docs/AI_BRIDGE.md §3). */
+  aiAvailable?: boolean;
 }
 
 // Server -> client: what just happened (for animations)

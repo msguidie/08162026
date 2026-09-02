@@ -1,4 +1,5 @@
 import React from 'react';
+import { Bot } from 'lucide-react';
 import useGameStore from '../store/gameStore';
 import Avatar from './Avatar';
 import type { LobbyPlayer, TeamId } from '../types';
@@ -8,6 +9,7 @@ export default function WaitingRoom() {
     lobbyPlayers, lobbyTeamMode, lobbyTeamFormat, lobbyTeamLayout, lobbyTeamSeats, lobbyUnlimitedTime,
     myAccount, toggleReady, toggleGoFirst, toggleTeamMode, toggleTeamLayout, toggleUnlimitedTime,
     selectTeamSeat, leaveLobby,
+    lobbyAiAvailable, addAI, removeAI, selectTeamSeatFor,
   } = useGameStore();
 
   const me = lobbyPlayers.find(p => p.username === myAccount?.username);
@@ -23,6 +25,16 @@ export default function WaitingRoom() {
     : lobbyPlayers.length >= 2 && lobbyPlayers.every(p => p.ready);
   const waitingCount = lobbyPlayers.filter(p => !p.ready).length;
   const emptySeatCount = requiredSeatCount - seatedNames.length;
+  // ── AI bots (docs/AI_BRIDGE.md §3) ──
+  const bots = lobbyPlayers.filter(p => p.isAI);
+  const unseatedBots = bots.filter(bot => !seatedNames.includes(bot.username));
+  const lobbyCapacity = lobbyTeamMode ? requiredSeatCount : 6;
+  const canAddAI = lobbyAiAvailable && lobbyPlayers.length < lobbyCapacity && bots.length < 4;
+  const seatFirstUnseatedBot = (teamId: TeamId, seatIndex: 0 | 1) => {
+    const bot = unseatedBots[0];
+    if (bot) selectTeamSeatFor(teamId, seatIndex, bot.username);
+  };
+
   const canShowTeamToggle = lobbyPlayers.length === 3 || lobbyPlayers.length === 4 || lobbyTeamMode;
   const canShowTimeToggle = lobbyPlayers.length === 3 || lobbyPlayers.length === 4 || lobbyTeamMode;
   const isOneVsTwo = lobbyTeamFormat === 'ONE_V_TWO';
@@ -109,6 +121,9 @@ export default function WaitingRoom() {
                   players={lobbyPlayers}
                   myUsername={myAccount?.username}
                   onSelectSeat={selectTeamSeat}
+                  onSeatAI={seatFirstUnseatedBot}
+                  onRemoveAI={removeAI}
+                  canSeatAI={unseatedBots.length > 0}
                 />
               ))}
             </div>
@@ -132,12 +147,25 @@ export default function WaitingRoom() {
                 }`}
               >
                 <Avatar seed={p.avatarSeed} size={36} />
-                <div className="flex-1 font-medium text-sm text-slate-700">{p.username}</div>
+                <div className="flex-1 min-w-0 flex items-center gap-1.5">
+                  <span className="font-medium text-sm text-slate-700 truncate">{p.username}</span>
+                  {p.isAI && <BotBadge />}
+                </div>
                 <div className="flex flex-col items-end gap-0.5 flex-shrink-0">
                   {p.wantsFirst && <span className="text-[9px] font-display font-semibold text-amber-600">First</span>}
-                  <span className={`text-xs font-medium ${p.ready ? 'text-[#5B8C6A]' : 'text-slate-400'}`}>
-                    {p.ready ? '✓ Ready' : 'Not Ready'}
-                  </span>
+                  {p.isAI ? (
+                    <button
+                      type="button"
+                      onClick={() => removeAI(p.username)}
+                      className="text-[10px] font-display font-semibold text-slate-400 hover:text-rose-500 transition"
+                    >
+                      Remove
+                    </button>
+                  ) : (
+                    <span className={`text-xs font-medium ${p.ready ? 'text-[#5B8C6A]' : 'text-slate-400'}`}>
+                      {p.ready ? '✓ Ready' : 'Not Ready'}
+                    </span>
+                  )}
                 </div>
               </div>
             ))}
@@ -145,6 +173,23 @@ export default function WaitingRoom() {
               <p className="text-slate-400 text-center py-4 text-sm">Waiting for players...</p>
             )}
           </div>
+        )}
+
+        {lobbyAiAvailable && (
+          <button
+            type="button"
+            onClick={addAI}
+            disabled={!canAddAI}
+            title={canAddAI ? 'Add an AI player to this lobby' : 'This lobby has no room for another AI player'}
+            className={`w-full py-2.5 rounded-xl border border-dashed text-sm font-display font-semibold flex items-center justify-center gap-2 transition ${
+              canAddAI
+                ? 'border-[#7B6FA0]/40 text-[#7B6FA0] hover:bg-white/60 hover:border-[#7B6FA0]/70'
+                : 'border-white/60 text-slate-300 cursor-not-allowed'
+            }`}
+          >
+            <Bot size={16} />
+            Add AI
+          </button>
         )}
 
         <div className="text-center min-h-[20px]">
@@ -203,7 +248,21 @@ function Switch({ checked, onClick, label }: { checked: boolean; onClick: () => 
   );
 }
 
-function TeamCard({ teamId, seats, title, seatCount, players, myUsername, onSelectSeat }: {
+function BotBadge() {
+  return (
+    <span
+      title="AI player"
+      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-[#7B6FA0]/10 text-[#7B6FA0] text-[9px] font-display font-semibold flex-shrink-0"
+    >
+      <Bot size={10} />
+      AI
+    </span>
+  );
+}
+
+function TeamCard({
+  teamId, seats, title, seatCount, players, myUsername, onSelectSeat, onSeatAI, onRemoveAI, canSeatAI,
+}: {
   teamId: TeamId;
   seats: [string | null, string | null];
   title: string;
@@ -211,6 +270,9 @@ function TeamCard({ teamId, seats, title, seatCount, players, myUsername, onSele
   players: LobbyPlayer[];
   myUsername?: string;
   onSelectSeat: (teamId: TeamId, seatIndex: 0 | 1) => void;
+  onSeatAI: (teamId: TeamId, seatIndex: 0 | 1) => void;
+  onRemoveAI: (username: string) => void;
+  canSeatAI: boolean;
 }) {
   const accent = teamId === 0 ? '#5B8C6A' : '#7B6FA0';
   return (
@@ -220,9 +282,34 @@ function TeamCard({ teamId, seats, title, seatCount, players, myUsername, onSele
         const player = username ? players.find(p => p.username === username) : undefined;
         const isMe = username === myUsername;
         const unavailable = !!username && !isMe;
-        return (
+
+        // A bot seat is a plain box (it never reacts to a click) with its own
+        // Remove control, so no button is ever nested inside another.
+        if (player?.isAI) {
+          return (
+            <div
+              key={seatIndex}
+              className="w-full min-h-[58px] rounded-xl border border-white/60 bg-white/55 flex items-center gap-2 px-3 py-2"
+              title={`${player.username} occupies this seat`}
+            >
+              <Avatar seed={player.avatarSeed} size={32} />
+              <span className="flex-1 min-w-0 flex items-center gap-1 text-left">
+                <span className="text-xs font-medium text-slate-700 truncate">{player.username}</span>
+                <BotBadge />
+              </span>
+              <button
+                type="button"
+                onClick={() => onRemoveAI(player.username)}
+                className="text-[10px] font-display font-semibold text-slate-400 hover:text-rose-500 transition flex-shrink-0"
+              >
+                Remove
+              </button>
+            </div>
+          );
+        }
+
+        const seatButton = (
           <button
-            key={seatIndex}
             type="button"
             disabled={unavailable}
             onClick={() => onSelectSeat(teamId, seatIndex as 0 | 1)}
@@ -252,6 +339,26 @@ function TeamCard({ teamId, seats, title, seatCount, players, myUsername, onSele
             )}
           </button>
         );
+
+        // An empty seat also offers to seat a waiting bot (it cannot click).
+        if (!player && canSeatAI) {
+          return (
+            <div key={seatIndex} className="relative">
+              {seatButton}
+              <button
+                type="button"
+                onClick={() => onSeatAI(teamId, seatIndex as 0 | 1)}
+                title="Seat an AI player here"
+                className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 rounded-lg bg-white/70 border border-white/70 text-[9px] font-display font-semibold text-[#7B6FA0] hover:border-[#7B6FA0]/50 hover:bg-white transition flex items-center gap-1"
+              >
+                <Bot size={10} />
+                AI
+              </button>
+            </div>
+          );
+        }
+
+        return <React.Fragment key={seatIndex}>{seatButton}</React.Fragment>;
       })}
     </div>
   );

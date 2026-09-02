@@ -29,6 +29,8 @@ interface GameStore {
   lobbyTeamLayout: TeamLayout;
   lobbyTeamSeats: TeamSeats;
   lobbyUnlimitedTime: boolean;
+  /** AI is enabled on this server and a worker is connected (docs/AI_BRIDGE.md §3). */
+  lobbyAiAvailable: boolean;
   gameState: GameState | null;
   actionMode: ActionMode;
   pendingTileChoice: number[] | null; // tile IDs to choose from
@@ -56,6 +58,9 @@ interface GameStore {
   toggleTeamLayout: () => void;
   toggleUnlimitedTime: () => void;
   selectTeamSeat: (teamId: TeamId, seatIndex: 0 | 1) => void;
+  selectTeamSeatFor: (teamId: TeamId, seatIndex: 0 | 1, username: string) => void;
+  addAI: () => void;
+  removeAI: (username: string) => void;
   setActionMode: (mode: ActionMode) => void;
   sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => void;
   chooseBonusTile: (tileId: number) => void;
@@ -96,6 +101,7 @@ const useGameStore = create<GameStore>((set, get) => {
       lobbyTeamLayout: lobbyState.teamLayout,
       lobbyTeamSeats: lobbyState.teamSeats,
       lobbyUnlimitedTime: lobbyState.unlimitedTime,
+      lobbyAiAvailable: lobbyState.aiAvailable === true,
     });
   }
 
@@ -278,6 +284,7 @@ const useGameStore = create<GameStore>((set, get) => {
     lobbyTeamLayout: 'ADJACENT',
     lobbyTeamSeats: EMPTY_TEAM_SEATS,
     lobbyUnlimitedTime: false,
+    lobbyAiAvailable: false,
     replayList: [],
     replayListLoading: false,
     replayListError: null,
@@ -343,7 +350,7 @@ const useGameStore = create<GameStore>((set, get) => {
       get().socket?.emit('leave_lobby');
       set({
         appPhase: 'LOGIN', lobbyPlayers: [], lobbyTeamMode: false, lobbyTeamFormat: null,
-        lobbyUnlimitedTime: false,
+        lobbyUnlimitedTime: false, lobbyAiAvailable: false,
         lobbyTeamLayout: 'ADJACENT', lobbyTeamSeats: EMPTY_TEAM_SEATS,
       });
     },
@@ -390,6 +397,32 @@ const useGameStore = create<GameStore>((set, get) => {
       const { socket } = get();
       if (!socket) return;
       socket.emit('select_team_seat', { teamId, seatIndex }, (res: { error?: string }) => {
+        if (res?.error) showToast(res.error, 'warn');
+      });
+    },
+
+    // ── AI bots (docs/AI_BRIDGE.md §3) ──
+    // Bots cannot click a seat themselves, so any lobby member seats them.
+    selectTeamSeatFor: (teamId, seatIndex, username) => {
+      const { socket } = get();
+      if (!socket) return;
+      socket.emit('select_team_seat', { teamId, seatIndex, forUsername: username }, (res: { error?: string }) => {
+        if (res?.error) showToast(res.error, 'warn');
+      });
+    },
+
+    addAI: () => {
+      const { socket } = get();
+      if (!socket) return;
+      socket.emit('lobby_add_ai', {}, (res: { error?: string; username?: string }) => {
+        if (res?.error) showToast(res.error, 'warn');
+      });
+    },
+
+    removeAI: (username: string) => {
+      const { socket } = get();
+      if (!socket) return;
+      socket.emit('lobby_remove_ai', { username }, (res: { error?: string }) => {
         if (res?.error) showToast(res.error, 'warn');
       });
     },

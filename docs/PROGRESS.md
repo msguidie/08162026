@@ -28,7 +28,7 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done · ❌ blocked
 - ⬜ PBS scripts + requirements
 
 ## Phase E — Deployment
-- 🟨 server/aiBridge.js + aiFallback.js + lobby AI seats + WaitingRoom UI (contract: docs/AI_BRIDGE.md)
+- ✅ server/aiBridge.js + aiFallback.js + lobby AI seats + WaitingRoom UI (126 server tests incl. bot e2e in 2p/1v2/2v2 and worker-crash fallback)
 - ⬜ splendor_ai/worker (Windows 3060) + run_worker.bat
 - ⬜ local end-to-end: AI plays 2p / 1v2 / 2v2 against scripted humans
 
