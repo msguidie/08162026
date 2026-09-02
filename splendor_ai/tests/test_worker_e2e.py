@@ -250,7 +250,14 @@ def check_run(stack: Stack, log_dir: Path, games: List[Dict],
         assert len(answered) == game["botTurns"], (
             f"{game['scenario']} {game['roomId']}: the worker answered "
             f"{len(answered)} moves but the bots took {game['botTurns']} turns")
-        assert all(m["level"] in expect_levels for m in room_moves), \
+        # A genuinely stuck seat (10 tokens, 3 reserved, nothing affordable — this
+        # variant has no pass) is answered with NONE by design; a random smoke net
+        # walks into that state occasionally, so accept it when the log says so.
+        def _level_ok(m):
+            if m["level"] in expect_levels:
+                return True
+            return m["level"] == "none" and "stuck" in str(m.get("notes", "")).lower()
+        assert all(_level_ok(m) for m in room_moves), \
             sorted({m["level"] for m in room_moves})
         assert all(m.get("actionIndex", -1) >= 0 for m in room_moves)
         total_bot_turns += game["botTurns"]
