@@ -55,10 +55,14 @@ def near(step):
 
 print(f"{'gen':>4} {'step':>7} {'games':>7} {'net/rand':>9} {'net/greedy':>11} "
       f"{'search/greedy':>14} {'loss':>7} {'v_mse':>7} {'v_ev':>6} {'top1':>6}")
+summary_games = ([r for r in rows if r["kind"] == "summary"] or [{}])[-1].get(
+    "games_done", 0)
 for e in evals:
     g = e.get("generation", 0)
     m = near(e.get("step", 0))
-    print(f"{g:>4} {e.get('step', 0):>7} {gens.get(g, {}).get('games_done', 0):>7} "
+    games = gens.get(g, {}).get("games_done") or (summary_games if e.get("final")
+                                                  else 0)
+    print(f"{g:>4} {e.get('step', 0):>7} {games:>7} "
           f"{e.get('net_vs_random', float('nan')):>9.3f} "
           f"{e.get('net_vs_greedy', float('nan')):>11.3f} "
           f"{e.get('search_vs_greedy', float('nan')):>14.3f} "

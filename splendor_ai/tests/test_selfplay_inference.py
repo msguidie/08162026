@@ -135,9 +135,10 @@ def test_two_actors_through_one_server(tmp_path):
         "selfplay.augment_rotations=2", "selfplay.mixed_game_frac=0.0",
         "search_full.sims=8", "search_full.universes=1",
         "search_fast.sims=4", "search_fast.universes=1",
+        "search_full.forced_playouts_k=0.0", "search_full.prune_policy_target=false",
         "inference.mode=server", "inference.devices=[cpu]",
         "inference.max_batch=64", "inference.max_wait_ms=2.0",
-        "selfplay.max_plies=60"])
+        "selfplay.max_plies=30"])
     cfg.make_dirs()
     _publish(cfg.latest_weights, cfg.net, seed=3)
 
@@ -161,7 +162,7 @@ def test_two_actors_through_one_server(tmp_path):
             proc = ctx.Process(target=actor_main,
                                args=(cfg, i, record_q, stats_q, stop,
                                      request_q, response_qs[i]),
-                               kwargs=dict(max_waves=25), daemon=True)
+                               kwargs=dict(max_waves=90), daemon=True)
             proc.start()
             actors.append(proc)
         deadline = time.time() + 180

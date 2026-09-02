@@ -185,7 +185,15 @@ class Actor:
             if kind == "anchor":
                 controllers[int(seat)] = _ANCHOR
             else:
-                controllers[int(seat)] = str(self.rng.choice(pool))
+                # Half the time reuse a checkpoint this process already holds:
+                # a 13M-parameter net costs ~200 ms to load, and with a pool of
+                # 16 and a cache of 3 an unbiased draw would thrash the cache
+                # on nearly every mixed game.
+                cached = [p for p in self._historical_order if p in pool]
+                if cached and self.rng.random() < 0.5:
+                    controllers[int(seat)] = str(self.rng.choice(cached))
+                else:
+                    controllers[int(seat)] = str(self.rng.choice(pool))
         return controllers, any(c != _CURRENT for c in controllers)
 
     def _historical_pool(self) -> List[str]:

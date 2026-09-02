@@ -22,10 +22,10 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done · ❌ blocked
 ## Phase D — Training system (multiplayer AlphaZero, see docs/AI_DESIGN.md)
 - ✅ D1 encoder (OBS v1 = 860), C5 symmetry (exact on 100k states), terminal values, 12.5M-param net + checkpoint gate
 - ✅ D1 search: PIMC PUCT/Gumbel MCTS, evaluators, scheduler, bots; G2 passed (greedy ≥96% vs random; MCTS@400 81% vs greedy)
-- 🟨 D2 self-play system: actors, inference servers, replay window, learner, train orchestrator, configs, bootstrap
+- ✅ D2 self-play system: actors, inference servers, replay window, learner, train orchestrator, configs, bootstrap, partial PPO fallback (55 tests)
 - ✅ D2 arena (paired seeds, seat rotation, Bradley–Terry, 54 tests), export bundle, NSCC PBS scripts + setup
-- ⬜ G3 CPU smoke run in this sandbox (beats random/greedy)
-- ⬜ PBS scripts + requirements
+- ✅ G3 CPU smoke run (21 min, 2p): NetBot 0.81–0.83 vs random, SearchBot@48 0.80–0.92 vs greedy; found+fixed forced-playout bug at low sims
+- ✅ PBS scripts + requirements (nscc_setup.sh, nscc_train.pbs self-chaining, nscc_eval.pbs)
 
 ## Phase E — Deployment
 - ✅ server/aiBridge.js + aiFallback.js + lobby AI seats + WaitingRoom UI (126 server tests incl. bot e2e in 2p/1v2/2v2 and worker-crash fallback)

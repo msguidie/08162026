@@ -17,8 +17,12 @@ from splendor_ai.model import SplendorNet, save_checkpoint
 def _cfg(tmp_path, **overrides):
     base = [f"run_dir={tmp_path}/run", "net.width=32", "net.blocks=1",
             "selfplay.games_per_actor=4", "selfplay.win_threshold=5",
-            "selfplay.max_plies=80", "selfplay.mixed_game_frac=0.0",
+            # short games on purpose: a record only ships when its game ends,
+            # so every slot must finish at least one game inside the wave budget
+            "selfplay.max_plies=30", "selfplay.mixed_game_frac=0.0",
             "search_full.sims=8", "search_full.universes=1",
+            "search_full.forced_playouts_k=0.0",
+            "search_full.prune_policy_target=false",
             "search_fast.sims=4", "search_fast.universes=1",
             "inference.mode=inproc"]
     base += [f"{k}={v}" for k, v in overrides.items()]
@@ -29,7 +33,7 @@ def _cfg(tmp_path, **overrides):
     return cfg
 
 
-def _run(cfg, waves=30, actor_id=0):
+def _run(cfg, waves=60, actor_id=0):
     out, stats = queue.Queue(), queue.Queue()
     actor = Actor(cfg, actor_id, out, stats)
     actor.run(max_waves=waves)
@@ -42,7 +46,7 @@ def _run(cfg, waves=30, actor_id=0):
 
 def test_actor_produces_valid_records(tmp_path):
     cfg = _cfg(tmp_path)
-    actor, records, payloads = _run(cfg, waves=40)
+    actor, records, payloads = _run(cfg, waves=60)
     assert actor.moves > 0 and actor.sims > 0
     assert actor.games_finished > 0
     assert len(records) > 0
@@ -57,12 +61,12 @@ def test_pcr_only_records_full_searches(tmp_path):
     """With ``pcr_full_prob = 0`` nothing may be recorded; with 1.0 the number
     of recorded positions must track the number of net moves."""
     cfg = _cfg(tmp_path, **{"selfplay.pcr_full_prob": 0.0})
-    actor, records, _ = _run(cfg, waves=20)
+    actor, records, _ = _run(cfg, waves=60)
     assert actor.moves > 0
     assert len(records) == 0
 
     cfg = _cfg(tmp_path, **{"selfplay.pcr_full_prob": 1.0})
-    actor, records, _ = _run(cfg, waves=40)
+    actor, records, _ = _run(cfg, waves=60)
     assert len(records) > 0
     assert actor.records_made == len(records)
 
@@ -70,7 +74,7 @@ def test_pcr_only_records_full_searches(tmp_path):
 def test_recorded_value_targets_match_the_game_outcome(tmp_path):
     """Column 0 of the learner's ``z`` must be the acting seat's own result."""
     cfg = _cfg(tmp_path, **{"selfplay.pcr_full_prob": 1.0})
-    _actor, records, _ = _run(cfg, waves=60)
+    _actor, records, _ = _run(cfg, waves=80)
     assert len(records) > 0
     batch = make_batch(records)
     for i in range(len(records)):
@@ -86,7 +90,7 @@ def test_recorded_value_targets_match_the_game_outcome(tmp_path):
 def test_truncation_downweights_the_value_target(tmp_path):
     cfg = _cfg(tmp_path, **{"selfplay.pcr_full_prob": 1.0,
                             "selfplay.max_plies": 6})
-    actor, records, _ = _run(cfg, waves=20)
+    actor, records, _ = _run(cfg, waves=40)
     assert actor.truncations > 0
     weights = np.unique(np.asarray(records["z_weight"], dtype=np.float32))
     assert weights.size == 1
@@ -98,7 +102,7 @@ def test_mixed_games_only_record_current_net_seats(tmp_path):
     cfg = _cfg(tmp_path, **{"selfplay.pcr_full_prob": 1.0,
                             "selfplay.mixed_game_frac": 1.0,
                             "selfplay.opponent_weights": "{anchor: 1.0}"})
-    actor, records, _ = _run(cfg, waves=40)
+    actor, records, _ = _run(cfg, waves=60)
     assert len(records) > 0
     # every game has exactly one greedy seat here, and no record may carry it
     per_game = {}

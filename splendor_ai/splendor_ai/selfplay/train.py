@@ -5,6 +5,7 @@
     python -m splendor_ai.selfplay.train --config splendor_ai/configs/smoke_cpu.yaml
     python -m splendor_ai.selfplay.train --config .../nscc_4xa100.yaml --resume runs/nscc0
     python -m splendor_ai.selfplay.train --config ... --set learner.batch=8192
+    python -m splendor_ai.selfplay.train --config ... --warm-start bootstrap.pt
     python -m splendor_ai.selfplay.train --evaluate runs/smoke/checkpoints/gen_0008.pt \
         --config splendor_ai/configs/smoke_cpu.yaml
 
@@ -555,6 +556,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="override any config leaf, e.g. --set learner.batch=512")
     p.add_argument("--evaluate", default=None, metavar="CHECKPOINT",
                    help="evaluate one checkpoint against the anchors and exit")
+    p.add_argument("--warm-start", default=None, metavar="CHECKPOINT",
+                   help="initialise the network from CHECKPOINT (e.g. the "
+                        "output of splendor_ai.selfplay.bootstrap) before the "
+                        "first generation; ignored when --resume finds state")
     p.add_argument("--print-config", action="store_true",
                    help="print the resolved config and exit")
     return p
@@ -588,6 +593,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     cfg.make_dirs()
     dump_config(cfg, os.path.join(cfg.run_dir, "config.yaml"))
     trainer = Trainer(cfg, resume=bool(args.resume))
+    if args.warm_start and trainer.learner.step == 0:
+        trainer.learner.warm_start(args.warm_start)
+        print(f"[train] warm started from {args.warm_start}", flush=True)
     summary = trainer.run()
     print(f"[train] done: {summary['games_done']} games, "
           f"{summary['generations']} generations, {summary['steps']} steps, "

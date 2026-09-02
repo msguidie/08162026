@@ -211,7 +211,11 @@ def paired_match(bot, opponent, mode_name: str = "ind2", pairs: int = 12,
 
     A pair is two games on the *same* deck seed with the seats rotated, so the
     deal cancels.  Score: win = 1, draw (equal value) = 0.5.  For n > 2 the
-    seat rotation cycles ``bot`` through every seat.
+    seat rotation cycles ``bot`` through every seat, but the other seats are
+    all the same opponent — the biased "1 vs (n-1)" arrangement judges.md warns
+    about.  That is acceptable for an in-run trend line in 2p (what G3
+    measures); the multi-seat *ratings* come from ``arena.run_matches``, which
+    schedules proper seat arrangements and fits a joint Bradley-Terry model.
     """
     n, _mode, _layout = MODE_SPECS[mode_name]
     arena = _arena_module()

@@ -259,12 +259,14 @@ class PPOLearner:
                 self.optimizer.step()
                 with torch.no_grad():
                     approx_kl = float((logp_old[idx] - logp).mean())
-                metrics = {"policy": float(policy_loss), "value": float(value_loss),
-                           "entropy": float(entropy), "total": float(loss),
-                           "approx_kl": approx_kl, "lr": lr,
-                           "grad_norm": float(grad_norm),
-                           "clip_frac": float(((ratio - 1).abs() > ppo.clip)
-                                              .float().mean())}
+                    metrics = {"policy": float(policy_loss.detach()),
+                               "value": float(value_loss.detach()),
+                               "entropy": float(entropy.detach()),
+                               "total": float(loss.detach()),
+                               "approx_kl": approx_kl, "lr": lr,
+                               "grad_norm": float(grad_norm),
+                               "clip_frac": float(((ratio - 1).abs() > ppo.clip)
+                                                  .float().mean())}
             if ppo.target_kl is not None and metrics.get("approx_kl", 0) > ppo.target_kl:
                 metrics["early_stop_epoch"] = epoch
                 break

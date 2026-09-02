@@ -20,6 +20,7 @@ the learner, and ``--out weights/latest.pt`` is a valid starting point for
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import random
 import sys
 import time
@@ -29,7 +30,7 @@ import numpy as np
 
 from ..rules import engine as E
 from ..search.evaluators import RolloutEvaluator, state_encoder
-from ..search.mcts import MCTS, SearchConfig
+from ..search.mcts import MCTS
 from ..values import standings_values, terminal_values
 from .config import MODE_SPECS, RunConfig, load_config
 from .replay import ReplayBuffer
@@ -44,9 +45,13 @@ def generate_games(cfg: RunConfig, games: int, sims: int, mode_name: str = "ind2
     """Play ``games`` teacher games and return their (augmented) records."""
     n, mode, layout = MODE_SPECS[mode_name]
     evaluator = RolloutEvaluator("greedy")
-    search_cfg = SearchConfig(sims=sims, noise=True, universes=2,
-                              temperature_plies=cfg.selfplay.temperature_plies,
-                              prune_policy_target=True)
+    # Inherit the run's own search settings (so the forced-playout decision in
+    # the config applies here too — at these budgets it must be off, see
+    # configs/smoke_cpu.yaml) and only override the budget and the noise.
+    search_cfg = dataclasses.replace(
+        cfg.search_full, sims=int(sims), noise=True,
+        temperature=cfg.selfplay.temperature,
+        temperature_plies=cfg.selfplay.temperature_plies)
     out: List[np.ndarray] = []
     rng = np.random.default_rng(seed)
     t0 = time.perf_counter()

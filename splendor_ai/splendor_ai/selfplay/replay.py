@@ -107,6 +107,8 @@ class ReplayBuffer:
         self.window_ramp = max(1, int(window_ramp_generations))
         self.max_samples = int(max_samples)
         self.rng = rng if rng is not None else np.random.default_rng(0)
+        #: shipments held before the open generation is compacted in place
+        self.compact_every = 256
         #: sealed generations, oldest first: ``(generation_id, records)``
         self.generations: List[Tuple[int, np.ndarray]] = []
         self._pending: List[np.ndarray] = []
@@ -127,6 +129,11 @@ class ReplayBuffer:
         self._pending.append(records)
         self._pending_n += len(records)
         self.total_added += len(records)
+        # Keep the number of blocks bounded: a 20k-game generation arrives as
+        # thousands of small shipments and ``sample`` touches every block it
+        # draws from, so compact them as they come in.
+        if len(self._pending) > self.compact_every:
+            self._pending = [np.concatenate(self._pending)]
         return len(records)
 
     def close_generation(self, generation: Optional[int] = None) -> int:

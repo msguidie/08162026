@@ -20,9 +20,10 @@ Layout (``RECORD_DTYPE``, ~414 bytes packed)::
 Conventions that the rest of the system depends on:
 
 * ``z``, ``root_value``, ``score`` and ``stuck`` are in **ABSOLUTE seat order**
-  (entries ``>= num_players`` are zero).  The learner rotates them to the
-  acting seat with :func:`splendor_ai.values.seat_relative`; nothing else in
-  the pipeline is allowed to rotate them.
+  (entries ``>= num_players`` are zero).  They are rotated to the acting seat
+  exactly once, in :func:`splendor_ai.selfplay.replay.seat_relative_rows` (the
+  vectorised :func:`splendor_ai.values.seat_relative`), on the way into a
+  learner batch; nothing else in the pipeline may rotate them.
 * the policy target sums to 1 and is zero on every illegal action — both are
   asserted on write by :func:`pack_policy` and re-checked in the learner.
 * ``rot`` records which C5 colour rotation produced the record (0 = the game as

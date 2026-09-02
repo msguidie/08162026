@@ -669,10 +669,10 @@ terminal value vector of §1.2.
   ┌─────┴─────────────────────┐   ┌────────────────────┐   ┌─────┴───┴─────┐
   │ ACTOR x N (CPU)           │   │ INFERENCE SERVER   │   │ EVAL PROCESS  │
   │  G games in lockstep      │   │  x1 per GPU        │   │ NetBot,       │
-  │  per move:                │──►│  coalesce ≤max_batch│  │ SearchBot vs  │
+  │  per move:                │──►│  coalesce max_batch│   │ SearchBot vs  │
   │   25% full search (600),  │◄──│  or max_wait_ms    │   │ random+greedy │
   │       noise, RECORDED     │   │  bf16 inference    │   │ paired, seat- │
-  │   75% fast search (120)   │   │  hot-reloads weights│  │ swapped       │
+  │   75% fast search (120)   │   │  reloads weights   │   │ swapped       │
   │  encode_batch over leaves │   └────────────────────┘   └───────────────┘
   │  C5 augmentation on write │      (inference.mode: server)
   └───────────────────────────┘      inproc → the net lives in the actor
@@ -708,9 +708,13 @@ python -m splendor_ai.selfplay.train --config ... --print-config
 python -m splendor_ai.selfplay.train --config splendor_ai/configs/smoke_cpu.yaml \
     --evaluate runs/smoke_cpu/checkpoints/gen_0008.pt
 
-# optional warm start: NN-free MCTS teacher → supervised pre-train
+# optional warm start: NN-free MCTS teacher → supervised pre-train, then
+# hand the result to the trainer (--warm-start, not weights/latest.pt: the
+# trainer republishes latest.pt from its own weights before the actors start)
 python -m splendor_ai.selfplay.bootstrap --config splendor_ai/configs/smoke_cpu.yaml \
-    --games 40 --sims 96 --steps 800 --out runs/smoke_cpu/weights/latest.pt
+    --games 60 --sims 96 --steps 1200 --out runs/bootstrap.pt
+python -m splendor_ai.selfplay.train --config splendor_ai/configs/smoke_cpu.yaml \
+    --warm-start runs/bootstrap.pt
 
 # tests (the loop test is opt-in because it costs ~3 minutes of CPU)
 pytest splendor_ai/tests/test_selfplay_*.py -q
@@ -772,6 +776,64 @@ threshold features against 15, so a net trained at 8 is a diagnostic, not an
 artefact. `configs/nscc_4xa100.yaml` sets it to `null` and the config
 validator refuses it for any team mode.
 
+### What the G3 gate actually measured here (4 CPU cores, ~21 minutes)
+
+Two runs of `scripts/smoke_cpu.sh`, both 2p INDIVIDUAL at the reduced win
+threshold: **A** from a random initialisation, **B** warm-started from a
+3-minute NN-free MCTS teacher (`selfplay/bootstrap.py`, 50 games @ 96 sims,
+1,200 supervised steps) via `--warm-start`.
+
+| | games | gens | steps | actor restarts | sims/s | moves/s | games/s | records/s | learner steps/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A from scratch | 7,123 | 11 | 12,183 | 0 | 5,256 | 266 | 5.58 | 306 | 9.6 |
+| B warm-started | 7,380 | 12 | 11,886 | 0 | 5,142 | 259 | 5.80 | 299 | 9.3 |
+
+Per-generation learning curve of run B (each anchor number is 50 paired games —
+that is ±7% of noise, so read the trend, not a point):
+
+| gen | games | NetBot vs random | NetBot vs greedy | SearchBot@48 vs greedy | value MSE | value EV |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 600 | 0.60 | 0.32 | 0.69 | 0.47 | 0.52 |
+| 2 | 1,800 | 0.76 | 0.56 | 0.75 | 0.39 | 0.60 |
+| 4 | 3,000 | 0.67 | 0.50 | 0.81 | 0.56 | 0.43 |
+| 6 | 4,200 | 0.80 | 0.54 | 0.69 | 0.45 | 0.54 |
+| 8 | 5,400 | 0.84 | 0.46 | 0.88 | 0.55 | 0.44 |
+| 10 | 6,600 | 0.76 | 0.48 | 0.94 | 0.59 | 0.41 |
+| 12 | 7,380 | 0.78 | 0.62 | 0.94 | 0.57 | 0.43 |
+
+Final checkpoints re-scored on a larger sample
+(`--evaluate --set eval.pairs=60 --set eval.search_pairs=25`):
+
+| | NetBot vs random (120 games) | NetBot vs greedy (120) | SearchBot@48 vs greedy (50) |
+| --- | ---: | ---: | ---: |
+| A from scratch | **0.808** | 0.383 | **0.800** |
+| B warm-started | **0.825** | 0.650 | **0.920** |
+| (reference) GreedyBot vs random | 0.90 | — | — |
+
+Both G3 targets — NetBot ≥ 0.80 vs random and SearchBot@48 > 0.55 vs greedy —
+are met, run B comfortably and run A at the boundary. Three things this run
+taught that are worth carrying to the node:
+
+1. **Forced playouts have to be off at a small simulation budget.** KataGo's
+   `n_forced = sqrt(k·P·N)` costs about `sqrt(k·N·L)` simulations at the root;
+   with N=48 and L≈25 legal actions that is the *entire* budget, so every action
+   gets 1–2 visits, the visit distribution comes out flat, and both the move and
+   the policy target are noise. Measured on the same weights: SearchBot@48 vs
+   greedy **0.25 with k=2 → 0.375 with k=0**, and over a full run the final
+   number went 0.19 → 0.80. `config.validate` now warns below 200 sims;
+   `nscc_4xa100.yaml` keeps them on, where 600 sims and a concentrated prior put
+   them back in their intended regime.
+2. **The bare policy walks into deadlocks.** In 60 NetBot-vs-random games, 6
+   ended with a stuck seat (no legal move → resign, §1.2) and 5 of those 6 were
+   losses — roughly a third of all its losses. Search does not have this problem
+   (the tree sees the resign as a terminal loss), which is a large part of the
+   gap between NetBot and SearchBot. The aux `stuck` head is the supervision
+   that should close it with more data.
+3. **Value MSE rises and explained variance falls late in the run.** That is not
+   divergence: as both seats improve, games get closer and the outcome gets
+   genuinely harder to predict from the position. Judge the run by the anchor
+   win rates and the policy loss, not by value MSE.
+
 ### Switching the learner to PPO
 
 `docs/AI_DESIGN.md` keeps masked PPO as the fallback learner: same actors,
@@ -808,6 +870,29 @@ Do not switch it on for a production run without finishing that list.
 | `learner.value_blend` | 0 = pure outcome target, 0.5 = the judges' `0.5·root Q + 0.5·outcome` blend. The root value is stored in every record, so this can be changed without regenerating data. |
 | `selfplay.mixed_game_frac`, `selfplay.opponent_weights` | league diversity: fraction of games with 1–2 seats played by a frozen historical checkpoint or the greedy anchor. Only current-net seats are recorded. |
 | `selfplay.phases` | the curriculum; each phase may override the mode mixture and the search budgets. |
+
+### The inference transport, measured
+
+`inference.mode: server` sends leaf batches over `multiprocessing.Queue`s
+carrying raw buffers. On this box (CPU, idle, 128x2 net), per actor:
+
+| rows per request | queue round trip | in-process evaluate | transport overhead |
+| ---: | ---: | ---: | ---: |
+| 8 | 2,227 us | 327 us | ~1.9 ms |
+| 24 | 2,463 us | 409 us | ~2.1 ms |
+| 64 | 2,940 us | 606 us | ~2.3 ms |
+
+The overhead is per *request*, not per row, so the fix when it bites is bigger
+requests: `selfplay.games_per_actor` sets how many leaves one lockstep round
+produces, and going from 8 to 64 games per actor takes the transport ceiling
+from ~3.6k to ~21.8k evaluations/s per actor. Measure this on the node before
+trusting the §1.8 throughput arithmetic: at 56 actors x 24 games the transport
+alone caps the node at roughly 550k evaluations/s, and the actor's own Python
+tree work comes out of the same budget. If G4 (>= 400k sims/s node-wide) misses,
+raise `games_per_actor` first, then consider the shared-memory slots the design
+doc originally called for — the queue was chosen because a shm ring has to be
+reclaimed correctly when an actor dies mid-request, and a dying actor is a
+routine, restarted event here.
 
 ### DDP
 
