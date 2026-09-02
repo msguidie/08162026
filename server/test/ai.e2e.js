@@ -598,6 +598,32 @@ async function run() {
     assertEqual((await api(baseUrl, '/api/ai/status')).body.name, 'mock-worker-2');
   });
 
+  await test('a worker connecting or disconnecting re-broadcasts the lobby', async () => {
+    // `aiAvailable` is a snapshot taken when the lobby is sent: members who
+    // are already sitting there have to be told when the worker comes or goes.
+    const human = await connect(baseUrl, 'ai-e2e-availability');
+    await enterLobby([human]);
+    assertEqual(human.lobby.aiAvailable, true, 'a worker is connected');
+
+    human.lobby = null;
+    stop(worker);
+    worker = null;
+    await waitFor(async () => human.lobby?.aiAvailable === false,
+      'a lobby_update announcing the worker went away', 10000);
+    assertEqual(human.lobby.players.map(player => player.username), ['ai-e2e-availability'],
+      'the lobby itself is unchanged');
+    assertEqual((await emitAck(human, 'lobby_add_ai', {})).error, 'No AI worker is connected right now');
+
+    human.lobby = null;
+    worker = await startWorker(baseUrl, { name: 'mock-worker-3' });
+    await waitFor(async () => human.lobby?.aiAvailable === true,
+      'a lobby_update announcing the new worker', 10000);
+    assertEqual((await emitAck(human, 'lobby_add_ai', {})).ok, true, 'and the button really works now');
+
+    human.socket.disconnect();
+    await sleep(80);
+  });
+
   suite('ai e2e — server without AI_WORKER_SECRET');
 
   await test('nothing AI-related is exposed', async () => {

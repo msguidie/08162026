@@ -9,16 +9,29 @@ forever:
 ======================  ====================================================
 ``random``              uniform over the legal actions
 ``greedy``              the 1-ply heuristic (``search.evaluators.greedy_action``)
-``mcts40``              NN-free PUCT, 40 sims, greedy-rollout leaf values
+``mcts40``              NN-free PUCT, 40 sims, heuristic priors + greedy-rollout
+                        leaf values
 ``mcts160``             the same search at 160 sims
 ``mcts640``             the same search at 640 sims
 ======================  ====================================================
 
-The three MCTS rungs share one :data:`ANCHOR_SEARCH` config and differ *only*
-in ``sims``, which makes them an absolute, monotone strength curve: if a
+The three MCTS rungs share one :data:`ANCHOR_SEARCH` config and one evaluator
+(:data:`ANCHOR_PRIORS` priors over greedy-rollout values) and differ *only* in
+``sims``, which makes them an absolute, monotone strength curve: if a
 checkpoint's Elo against ``mcts160`` rises while its Elo against ``mcts640``
 does not, that is a real, interpretable signal rather than pool noise.  Do not
 "improve" these settings — a changed anchor invalidates every historical Elo.
+
+The ladder must also be monotone in itself, and with *uniform* leaf priors it
+was not: at 40 simulations PUCT spends its whole budget on the ~40-way take
+block and never expands a buy, so ``mcts40`` scored 0.13 against ``greedy``
+over 20 paired 2p games — a rung *below* the rung under it, which makes any
+Elo fitted through it meaningless.  The anchors therefore use
+``RolloutEvaluator(..., priors='heuristic')``: the same NN-free greedy rollout
+for the value, with the buy block weighted up in the prior
+(``search.evaluators.heuristic_priors``).  Measured over 20 paired ind2 games
+that lifts ``mcts40`` to 0.71 against ``greedy`` and leaves the ordering
+``greedy < mcts40 < mcts160 < mcts640``.
 
 Learned bots are built from a checkpoint:
 
@@ -76,6 +89,11 @@ ANCHOR_SIMS: Dict[str, int] = {"mcts40": 40, "mcts160": 160, "mcts640": 640}
 #: Plies a leaf rollout plays before it is scored by current standings.
 ANCHOR_ROLLOUT_PLIES = 60
 
+#: Leaf priors of the MCTS rungs.  ``'heuristic'`` = buy-biased
+#: (:func:`~.search.evaluators.heuristic_priors`); ``'uniform'`` is what the
+#: ladder used before and is kept only for A/B experiments.
+ANCHOR_PRIORS = "heuristic"
+
 #: The frozen search settings shared by every MCTS anchor.  Evaluation-mode
 #: PUCT: no Dirichlet noise, no forced playouts (both are training devices
 #: that deliberately distort the visit distribution), argmax move selection.
@@ -128,7 +146,8 @@ def make_anchor(name: str) -> Bot:
             raise ValueError(f"anchor {name!r} needs a positive sim count")
         return MctsBot(
             anchor_search_config(sims),
-            RolloutEvaluator("greedy", max_plies=ANCHOR_ROLLOUT_PLIES),
+            RolloutEvaluator("greedy", max_plies=ANCHOR_ROLLOUT_PLIES,
+                             priors=ANCHOR_PRIORS),
             state_encoder,
             name=name,
         )

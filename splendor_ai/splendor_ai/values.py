@@ -30,7 +30,7 @@ from typing import List, Sequence
 import numpy as np
 
 from .rules.engine import (GameState, MODE_INDIVIDUAL, MODE_ONE_V_TWO,
-                           PHASE_GAME_OVER)
+                           PHASE_GAME_OVER, resolve_one_vs_two_winners)
 
 #: Width of every value vector: the largest table this variant supports.
 MAX_SEATS = 4
@@ -39,8 +39,12 @@ MAX_SEATS = 4
 #: :func:`standings_values` instead of a real terminal (§1.2).
 TRUNCATION_Z_WEIGHT = 0.3
 
+#: Per-side score thresholds (``engine.qualifying_team_ids``).  The 1v2 sides
+#: have *different* ones, so only progress towards them is comparable; both
+#: TEAM sides share one, which is what makes the TEAM comparison symmetric.
 _SOLO_THRESHOLD = 15
 _DUO_THRESHOLD = 34
+_TEAM_THRESHOLD = 30
 
 
 def _rank_values(state: GameState, keys: Sequence[tuple]) -> np.ndarray:
@@ -116,11 +120,22 @@ def standings_values(state: GameState) -> np.ndarray:
     """Value vector for a game cut short at ``max_plies``.
 
     The same ranking as :func:`terminal_values`, applied to the standings as
-    they are: individual seats by (score desc, cards asc) with resigned seats
-    last; team sides by total (cards break the tie); the 1v2 sides by how far
-    each is past its own threshold, which is what
-    ``resolve_one_vs_two_winners`` compares.  ``game_result`` is ignored, so
-    this is meaningful on an unfinished position.
+    they are.  ``game_result`` is ignored, so this is meaningful on an
+    unfinished position.
+
+    * INDIVIDUAL — seats by (score desc, cards asc), resigned seats last.
+    * TEAM — by team total, card count breaking the tie.  Both sides need the
+      same 30 points, so their progress ratios share a denominator and
+      comparing the totals directly is already threshold-normalised (and
+      therefore symmetric: swapping the two sides negates the vector).
+    * ONE_V_TWO — once a side has qualified the real rule can call the game,
+      so :func:`~splendor_ai.rules.engine.resolve_one_vs_two_winners` (excess
+      over each side's own threshold) decides it, exactly as the engine will
+      at the end of the round.  Before that, the sides are compared by how far
+      each has come towards its own threshold, graded in ``[-1, 1]``: the two
+      thresholds differ by 19 points, so a plain difference of excesses is
+      dominated by that offset and would score almost every early position as
+      a solo win.
     """
     mode = state.mode
     if mode == MODE_INDIVIDUAL:
@@ -132,17 +147,35 @@ def standings_values(state: GameState) -> np.ndarray:
         if p.team_id is not None:
             totals[p.team_id] += p.score
             cards[p.team_id] += len(p.cards)
-    if mode == MODE_ONE_V_TWO:
-        margin = ((totals[0] - _SOLO_THRESHOLD) - (totals[1] - _DUO_THRESHOLD))
-        lead = 0 if margin == 0 else (1 if margin > 0 else -1)
-    else:
-        if totals[0] != totals[1]:
-            lead = 1 if totals[0] > totals[1] else -1
-        elif cards[0] != cards[1]:
-            lead = 1 if cards[0] < cards[1] else -1
-        else:
-            lead = 0
     z = np.zeros(MAX_SEATS, dtype=np.float32)
+
+    if mode == MODE_ONE_V_TWO:
+        # A side has already qualified → the engine's own rule decides.  It
+        # returns [] while neither side qualifies and both ids on an exact
+        # excess tie (which _team_side_values scores as a draw).
+        winners = resolve_one_vs_two_winners(state)
+        if winners:
+            return _team_side_values(state, winners)
+        solo_prog = totals[0] / _SOLO_THRESHOLD
+        duo_prog = totals[1] / _DUO_THRESHOLD
+        v_solo = float(np.clip(2.0 * (solo_prog - duo_prog), -1.0, 1.0))
+        for i, p in enumerate(state.players):
+            if p.team_id == 0:
+                z[i] = v_solo
+            elif p.team_id == 1:
+                z[i] = -v_solo
+        return z
+
+    # TEAM: both sides need the same 30 points, so dividing by the shared
+    # threshold cannot change the order or the ties — the comparison is
+    # symmetric, and swapping the sides just negates the vector.
+    prog = (totals[0] / _TEAM_THRESHOLD, totals[1] / _TEAM_THRESHOLD)
+    if prog[0] != prog[1]:
+        lead = 1 if prog[0] > prog[1] else -1
+    elif cards[0] != cards[1]:
+        lead = 1 if cards[0] < cards[1] else -1
+    else:
+        lead = 0
     if lead:
         for i, p in enumerate(state.players):
             if p.team_id is not None:

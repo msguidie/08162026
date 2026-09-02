@@ -109,8 +109,10 @@ Loss = CE(policy_target, log_softmax(masked logits)) + 1.0·masked-MSE(value, z)
   `tree.result() -> SearchResult(visits[65], policy_target[65], root_value[4], chosen_action, stats)`.
   `Scheduler` runs G trees in lockstep with one `Evaluator.evaluate(obs[B], mask[B]) -> (priors[B,65], values[B,4])`
   call per step (no virtual loss needed).
-- `evaluators.py`: `NetEvaluator` (torch, batch), `UniformRolloutEvaluator` (NN-free: uniform prior, greedy/random
-  rollout value), used for the anchor bot and bootstrap.
+- `evaluators.py`: `NetEvaluator` (torch, batch), `RolloutEvaluator` (NN-free: greedy/random rollout value, prior
+  `uniform` — the `UniformRolloutEvaluator` alias — or `heuristic`), `GreedyValueEvaluator` (static 1-ply value +
+  the same buy-biased prior), `heuristic_priors(mask)` shared by both. The anchor bots use
+  `RolloutEvaluator(priors='heuristic')`; bootstrap uses the uniform one.
 - Tests: 2p antisymmetry (`value[0] ≈ -value[1]` in symmetric positions), seat relabelling consistency,
   search@400 with the NN-free evaluator beats the greedy bot ≥75% in 2p over ≥100 paired games.
 
@@ -121,6 +123,19 @@ fallback design), `MctsBot(evaluator, sims)`, `NetBot` (policy argmax, no search
 Arena: paired seeds with full seat rotation (2p: swap; n>2: all cyclic rotations of the seating), per-mode results,
 Bradley–Terry/BayesElo fit over the whole result matrix (pinned anchors: random=0, greedy, mcts-anchor), 95% CIs,
 win-as-seat-k table, STALE/deadlock bucket, JSON + markdown report.
+
+**Anchor ladder (`splendor_ai/anchors.py`, frozen).** `random` < `greedy` < `mcts40` < `mcts160` < `mcts640`; the
+three MCTS rungs share one `SearchConfig` (`ANCHOR_SEARCH`: no noise, no forced playouts, argmax) and one evaluator
+and differ only in `sims`. The evaluator is `RolloutEvaluator('greedy', max_plies=60, priors='heuristic')`:
+greedy-rollout leaf values with the **buy-biased prior** of `heuristic_priors`. The prior is not cosmetic — with
+uniform priors a 40-simulation PUCT search spends its whole budget on the ~40-way take block and never expands a
+buy, so `mcts40` scored **0.13** against `greedy` over 20 paired ind2 games, i.e. the ladder had a rung *below* the
+rung under it and any Elo fitted through it was meaningless. With the heuristic prior the same rung scores **0.71**
+against `greedy` and the ladder is monotone end to end. Measured, 20 paired ind2 games per pairing (win rate of
+the stronger rung): greedy 0.98 vs random, mcts40 0.71 vs greedy, mcts160 0.90 vs greedy, mcts160 0.78 vs mcts40,
+mcts640 0.65 vs mcts160, mcts640 1.00 vs random. The ladder is frozen again at that point: retuning an anchor
+invalidates every historical Elo number. Re-measure it (`--bots random greedy mcts40 mcts160 mcts640 --modes ind2`)
+after any change under `search/`.
 
 ### 1.8 Self-play system — `splendor_ai/selfplay/`
 - `config.py`: dataclasses + YAML (`configs/smoke_cpu.yaml`, `configs/nscc_4xa100.yaml`).
@@ -181,4 +196,5 @@ roeey777/Splendor-AI) with notices retained; everything else re-implemented from
   branching at 1); never divide backed-up values by the number of chance children.
 - Opponent pool: PFSP weights (1 - winrate)^0.5 with pinned anchors; for 1v2 track solo-seat and duo-seat win rates
   separately (an agent can be exploitable in one role while fine on average).
-- Evaluation ladder: NN-free MCTS anchor at 40/160/640 sims as an absolute, monotone strength curve.
+- Evaluation ladder: NN-free MCTS anchor at 40/160/640 sims as an absolute, monotone strength curve — monotone
+  *including* against `greedy`, which needs the buy-biased leaf prior at the 40-sim rung (§1.7).

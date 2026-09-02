@@ -214,8 +214,9 @@ class GameState:
     #   +6     gems[6]
     #   +      tiles: count, then tile ids
     #   +      pending_tile_choice: 255 = None, else count + tile ids
-    #   +      game_result: 0 = None, else reason code (1 SCORE / 2 FORFEIT /
-    #          3 other), forfeitingTeamId (255 = None), winningTeamIds
+    #   +      game_result: 0 = no result at all, else reason code (1 SCORE /
+    #          2 FORFEIT / 3 result present with a None or unrecognised
+    #          reason), forfeitingTeamId (255 = None), winningTeamIds
     #          (255 = absent, else count + ids)
     #   +      board:  3 x (count + card ids), tier 1..3
     #   +      decks:  3 x (count + card ids) in SERVER order (pop() = last)
@@ -231,12 +232,17 @@ class GameState:
     # ``apply``; they are not part of the position and are reset to ``None``.
     # Cosmetic ``username`` / ``avatar_seed`` are likewise not stored.
 
-    BYTES_VERSION = 1
+    # 2: a game_result whose reason is None no longer collides with "no
+    #    game_result" (v1 wrote code 0 for both and dropped the result).
+    BYTES_VERSION = 2
 
     _MODE_CODES = (MODE_INDIVIDUAL, MODE_TEAM, MODE_ONE_V_TWO)
     _LAYOUT_CODES = (None, "ADJACENT", "OPPOSITE")
     _TA_CODES = (None, TA_BUY, TA_TAKE_GEMS, TA_RESERVE)
     _REASON_CODES = (None, "SCORE", "FORFEIT")
+    #: Written when a result is present but its reason is None or is not one of
+    #: the named codes above; ``0`` is reserved for "no result at all".
+    _REASON_CODE_OTHER = 3
 
     def to_bytes(self) -> bytes:
         """Serialize the position; see the table above."""
@@ -271,8 +277,11 @@ class GameState:
             ap(0)
         else:
             reason = gr.get("reason")
+            # NB: `reason is None` must NOT take the index() branch — code 0
+            # means "no game_result" and would lose the result on the way back.
             ap(GameState._REASON_CODES.index(reason)
-               if reason in GameState._REASON_CODES else 3)
+               if reason in GameState._REASON_CODES[1:]
+               else GameState._REASON_CODE_OTHER)
             forfeiting = gr.get("forfeitingTeamId")
             ap(255 if forfeiting is None else forfeiting)
             winning = gr.get("winningTeamIds")
@@ -357,7 +366,8 @@ class GameState:
         else:
             result: Dict[str, Any] = {
                 "reason": (GameState._REASON_CODES[reason_code]
-                           if reason_code < 3 else None)}
+                           if reason_code < GameState._REASON_CODE_OTHER
+                           else None)}
             forfeiting = buf[i]
             i += 1
             if forfeiting != 255:
@@ -833,9 +843,20 @@ def rating_changes(state: GameState) -> List[int]:
 
 
 def individual_winners(state: GameState) -> List[int]:
-    """Seats sharing the top rank (same ordering as ``calculateRatingChanges``:
-    higher score first, fewer cards breaks the tie)."""
-    ranked = [(i, p.score, len(p.cards)) for i, p in enumerate(state.players)]
+    """Seats sharing the top rank among the seats still in the game (same
+    ordering as ``calculateRatingChanges``: higher score first, fewer cards
+    breaks the tie).
+
+    Port of ``individualWinners`` in ``server/replayRecorder.js``, which is the
+    authoritative producer of a replay's ``winners`` field: a seat that
+    resigned (or timed out) is never a winner, even when its frozen score
+    still tops the table.  Returns ``[]`` if every seat resigned.
+    """
+    resigned = state.resigned
+    ranked = [(i, p.score, len(p.cards))
+              for i, p in enumerate(state.players) if i not in resigned]
+    if not ranked:
+        return []
     ranked.sort(key=lambda r: (-r[1], r[2]))
     best = ranked[0]
     return sorted(r[0] for r in ranked

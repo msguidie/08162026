@@ -326,19 +326,48 @@ async function run() {
     assertEqual(json.result.rating, [0, 5, 5]);
   });
 
-  await test('INDIVIDUAL: a resigned seat is stored with a rating delta of 0', () => {
-    // index.js applies ratings with excludeResigned when an INDIVIDUAL game ends on a
-    // resignation/timeout, so seat 2's account is never credited even though the raw
-    // ranking hands it +3. The stored replay must say the same.
+  await test('INDIVIDUAL ending on a resignation zeroes the resigned seat', () => {
+    // index.js → resignPlayer applies ratings with excludeResigned, so seat 2's
+    // account is never credited even though the raw ranking hands it +3.
     const state = syntheticState([
       player('a', 15, 11), player('b', 4, 3), player('c', 9, 7),
     ], { resignedPlayers: [2] });
     const room = makeSyntheticRoom(state, [5, 1, 3]);
     recorder.begin(room);
+    recorder.onActionResult(room, { type: 'BUY_CARD', actingPlayer: 0, payload: { cardId: 12, source: 'board' } });
+    recorder.onResign(room, 2);
     const json = recorder.finish(room);
     assertEqual(json.result.rating, [5, 1, 0], 'the resigned seat earns nothing');
     assertEqual(json.result.resigned, [2]);
     assertEqual(json.result.winners, [0], 'resigned seats are still excluded from the winners');
+  });
+
+  await test('INDIVIDUAL ending on a timeout zeroes the timed-out seat', () => {
+    // eliminateTimedOutPlayer passes excludeResigned too — same rule as a resignation.
+    const state = syntheticState([
+      player('a', 15, 11), player('b', 4, 3), player('c', 9, 7),
+    ], { resignedPlayers: [2] });
+    const room = makeSyntheticRoom(state, [5, 1, 3]);
+    recorder.begin(room);
+    recorder.onTimeout(room, 2);
+    const json = recorder.finish(room);
+    assertEqual(json.result.rating, [5, 1, 0], 'the timed-out seat earns nothing');
+  });
+
+  await test('INDIVIDUAL ending on a normal move keeps the resigned seat\'s delta', () => {
+    // applyGameAction never passes excludeResigned, so a seat that resigned earlier
+    // *is* credited when somebody else ends the game by reaching the target score.
+    const state = syntheticState([
+      player('a', 15, 11), player('b', 4, 3), player('c', 9, 7),
+    ], { resignedPlayers: [2] });
+    const room = makeSyntheticRoom(state, [5, 1, 3]);
+    recorder.begin(room);
+    recorder.onResign(room, 2);
+    recorder.onActionResult(room, { type: 'BUY_CARD', actingPlayer: 0, payload: { cardId: 12, source: 'board' } });
+    const json = recorder.finish(room);
+    assertEqual(json.result.rating, [5, 1, 3], 'the server credited every seat');
+    assertEqual(json.result.resigned, [2]);
+    assertEqual(json.result.winners, [0], 'winners still exclude the resigned seat');
   });
 
   await test('team modes keep the rating the server credited for resigned seats', () => {

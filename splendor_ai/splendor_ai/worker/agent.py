@@ -48,10 +48,20 @@ from .adapter import HydrationError, hydrate, payload_mode_key, to_wire
 from .config import WorkerConfig
 
 __all__ = ["MoveAgent", "Decision", "ModelHandle", "resolve_device",
-           "self_stuck_after", "LEVELS"]
+           "self_stuck_after", "LEVELS", "SKEW_FLOOR_MS", "MIN_BUDGET_MS"]
 
 #: Ladder rungs, strongest first.
 LEVELS = ("search", "policy", "greedy", "none")
+
+#: ``deadlineMs`` is an absolute epoch stamp taken on the SERVER's clock, and
+#: the two machines are not synchronised (a home worker and a Render dyno can
+#: sit seconds apart).  A request that has only just arrived cannot really have
+#: less than this long to run — the server's own budget is 15 s — so a smaller
+#: "remaining" is read as clock skew and the local budget is used instead.
+SKEW_FLOOR_MS = 500.0
+
+#: Floor for a genuinely short budget (the request queued behind another move).
+MIN_BUDGET_MS = 50.0
 
 _NONE_ACTION = {"type": "NONE"}
 
@@ -198,6 +208,7 @@ class MoveAgent:
         self._greedy = None
         self._rng = np.random.default_rng(cfg.seed or None)
         self._warned_no_model = False
+        self._warned_clock_skew = False
 
     # -- torch / models ---------------------------------------------------
     def _ensure_torch(self) -> bool:
@@ -257,44 +268,118 @@ class MoveAgent:
                          f"step {handle.step}) on {self.device}")
         return handle
 
+    def warmup_keys(self) -> Tuple[str, ...]:
+        """Model keys this worker can be asked for, given ``cfg.modes``.
+
+        ``mode_key()`` maps a request to ``ind2|ind3|ind4|ovt|team``; a worker
+        that only advertises INDIVIDUAL will never be asked for ``team``, so
+        only the reachable keys are warmed.
+        """
+        modes = {str(m).upper() for m in self.cfg.modes}
+        keys: List[str] = []
+        if "INDIVIDUAL" in modes:
+            keys += ["ind2", "ind3", "ind4"]
+        if "ONE_V_TWO" in modes:
+            keys.append("ovt")
+        if "TEAM" in modes:
+            keys.append("team")
+        return tuple(keys or ["ind2"])
+
+    @staticmethod
+    def _warmup_position(key: str) -> E.GameState:
+        """A short, legal position of the shape ``key`` describes."""
+        if key == "ovt":
+            state = E.new_game(3, E.MODE_ONE_V_TWO, rng=random.Random(0))
+        elif key == "team":
+            state = E.new_game(4, E.MODE_TEAM, "ADJACENT", rng=random.Random(0))
+        else:
+            players = {"ind3": 3, "ind4": 4}.get(key, 2)
+            state = E.new_game(players, rng=random.Random(0))
+        for _ in range(6):
+            actions = E.legal_actions(state)
+            if not actions:
+                break
+            E.apply(state, actions[0])
+        return state
+
     def warmup(self) -> None:
         """Pay the cold-start cost up front, not on somebody's first move.
 
         Loading torch, importing the search, building the CUDA context and
         JIT-warming the first forward pass together cost a second or two; the
         first real request would otherwise blow through its soft budget.
+
+        Every mode this worker serves is warmed, not just ``ind2``: with
+        per-mode checkpoints (``MODEL_DIR/ovt.pt`` …) each one is a separate
+        file, a separate torch module and a separate cold start, so warming
+        one of them left the first request of every *other* mode paying it.
+        Distinct keys that resolve to the same file (the usual
+        ``shared.pt`` deployment) are searched once.
         """
         started = time.monotonic()
-        handle = self.model_for("ind2")
-        if handle is None:
-            return
-        try:
-            state = E.new_game(2, rng=random.Random(0))
-            for _ in range(6):
-                E.apply(state, E.legal_actions(state)[0])
-            decision = Decision(action=_NONE_ACTION, level="warmup", seat=0)
-            soft = time.monotonic() + 2.0
-            self._search(state, state.current_player, handle, soft, soft + 1.0,
-                         decision)
-            self.log("info", f"warm-up done in "
-                             f"{(time.monotonic() - started) * 1000:.0f} ms "
-                             f"({decision.sims} simulations)")
-        except Exception as err:                          # pragma: no cover
-            self.log("warn", f"model warm-up failed: {err}")
+        warmed: Dict[str, str] = {}                 # checkpoint path -> key
+        for key in self.warmup_keys():
+            handle = self.model_for(key)
+            if handle is None:
+                continue
+            path = str(handle.path)
+            if path in warmed:
+                self.log("debug", f"warm-up: {key} shares "
+                                  f"{Path(path).name} with {warmed[path]}")
+                continue
+            warmed[path] = key
+            try:
+                state = self._warmup_position(key)
+                decision = Decision(action=_NONE_ACTION, level="warmup", seat=0)
+                soft = time.monotonic() + 2.0
+                self._search(state, state.current_player, handle, soft,
+                             soft + 1.0, decision)
+                self.log("info", f"warm-up {key} ({Path(path).name}) in "
+                                 f"{(time.monotonic() - started) * 1000:.0f} ms "
+                                 f"({decision.sims} simulations)")
+            except Exception as err:                      # pragma: no cover
+                self.log("warn", f"model warm-up for {key} failed: {err}")
 
     # -- budgets ----------------------------------------------------------
     def _budgets(self, payload: Mapping[str, Any],
                  started: float) -> Tuple[float, float]:
-        """``(soft, hard)`` deadlines as ``time.monotonic`` stamps."""
+        """``(soft, hard)`` deadlines as ``time.monotonic`` stamps.
+
+        ``payload['deadlineMs']`` is epoch milliseconds on the SERVER's clock;
+        ours may be minutes away from it.  The deadline can therefore only
+        *shorten* the local budget, never lengthen it, and a "remaining" that
+        is implausibly small for a request we have only just picked up
+        (< :data:`SKEW_FLOOR_MS`) is treated as skew and ignored — otherwise a
+        worker whose clock runs a few seconds fast would play every move on a
+        50 ms budget, i.e. on the greedy rung, for ever.
+        """
         cfg = self.cfg
-        hard_ms = max(cfg.hard_budget_ms, cfg.time_budget_ms)
+        local_ms = float(max(cfg.hard_budget_ms, cfg.time_budget_ms))
+        hard_ms = local_ms
         deadline = payload.get("deadlineMs")
         if isinstance(deadline, (int, float)) and deadline > 0:
-            remaining = float(deadline) - time.time() * 1000.0 \
-                - cfg.deadline_margin_ms
-            hard_ms = max(50.0, min(hard_ms, remaining))
+            remaining = max(0.0, float(deadline) - time.time() * 1000.0)
+            waited_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+            if remaining < SKEW_FLOOR_MS and waited_ms < SKEW_FLOOR_MS:
+                self._note_clock_skew(float(deadline), remaining)
+            else:
+                hard_ms = max(MIN_BUDGET_MS,
+                              min(local_ms, remaining - cfg.deadline_margin_ms))
         soft_ms = min(float(cfg.time_budget_ms), hard_ms)
         return started + soft_ms / 1000.0, started + hard_ms / 1000.0
+
+    def _note_clock_skew(self, deadline_ms: float, remaining_ms: float) -> None:
+        """Log the first skewed deadline; stay silent afterwards."""
+        if self._warned_clock_skew:
+            return
+        self._warned_clock_skew = True
+        self.log("warn",
+                 f"server deadline {deadline_ms:.0f} leaves only "
+                 f"{remaining_ms:.0f} ms on this machine's clock for a request "
+                 f"that just arrived — treating it as clock skew and using the "
+                 f"local budget ({self.cfg.time_budget_ms}/"
+                 f"{self.cfg.hard_budget_ms} ms). Sync the worker's clock "
+                 f"(NTP) if moves start arriving late.")
 
     # -- the ladder -------------------------------------------------------
     def decide(self, payload: Mapping[str, Any]) -> Decision:

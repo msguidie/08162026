@@ -393,6 +393,38 @@ def test_gumbel_root_returns_a_valid_improved_policy():
     assert res.visits.sum() >= cfg.sims - 4
 
 
+def test_gumbel_root_at_temperature_zero_is_the_noise_free_argmax():
+    """The action played must be ``argmax(policy_target)``.
+
+    The improved policy is ``softmax(logits + sigma(completedQ))`` — no Gumbel
+    term.  Picking the best of the *halving survivors* instead let the noise
+    back in through the candidate set, so the move played disagreed with the
+    policy the very same search reports (and that the learner trains on).
+    """
+    for seed in range(12):
+        s = E.new_game(2, rng=random.Random(seed))
+        cfg = SearchConfig(sims=96, root="gumbel", gumbel_m=8,
+                           temperature=0.0, temperature_plies=0)
+        res = run_search(s, 0, GreedyValueEvaluator(), state_encoder, cfg,
+                         np.random.default_rng(seed))
+        t = res.policy_target
+        assert E.legal_mask(s)[res.action]
+        assert res.action == int(np.argmax(t)), (seed, res.action, np.argmax(t))
+        assert t[res.action] == t.max()
+
+    # …and it holds for every Gumbel draw: the noise still decides which
+    # actions sequential halving examines (so the completed Qs, and with them
+    # the improved policy, still move with the seed), but it no longer decides
+    # which of them is played.
+    s = E.new_game(2, rng=random.Random(5))
+    cfg = SearchConfig(sims=160, root="gumbel", gumbel_m=16, temperature=0.0,
+                       temperature_plies=0)
+    for rng_seed in range(6):
+        res = run_search(s, 0, GreedyValueEvaluator(), state_encoder, cfg,
+                         np.random.default_rng(rng_seed))
+        assert res.action == int(np.argmax(res.policy_target)), rng_seed
+
+
 def test_gumbel_root_solves_the_tactical_position():
     s, target = tactical_win_position()
     cfg = SearchConfig(sims=200, root="gumbel", gumbel_m=16, temperature_plies=0)

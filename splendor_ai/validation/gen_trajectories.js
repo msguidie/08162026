@@ -548,10 +548,18 @@ function playGame(opt, gameIndex, emit, stats) {
     rating: ratings,
   };
   if (opt.mode === 'INDIVIDUAL') {
-    const ranked = state.players.map((p, i) => ({ i, s: p.score, c: p.cards.length }));
+    // Same rule as `individualWinners` in server/replayRecorder.js, which is what
+    // actually writes a replay's `winners`: rank the ACTIVE seats only (a resigned
+    // seat is left on 0 points and 0 cards, so it would win every card tiebreak).
+    const resigned = state.resignedPlayers || [];
+    const ranked = state.players
+      .map((p, i) => ({ i, s: p.score, c: p.cards.length }))
+      .filter(r => !resigned.includes(r.i));
     ranked.sort((a, b) => (b.s !== a.s ? b.s - a.s : a.c - b.c));
     const best = ranked[0];
-    result.winners = ranked.filter(r => r.s === best.s && r.c === best.c).map(r => r.i).sort((a, b) => a - b);
+    result.winners = best
+      ? ranked.filter(r => r.s === best.s && r.c === best.c).map(r => r.i).sort((a, b) => a - b)
+      : [];
   }
 
   const replayJson = {

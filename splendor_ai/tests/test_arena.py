@@ -49,6 +49,10 @@ def test_anchor_ladder_is_the_frozen_five():
         assert bot.cfg.forced_playouts_k == 0.0
         assert bot.cfg.temperature_plies == 0
         assert bot.evaluator.policy == "greedy"
+        # The buy-biased leaf prior is part of the frozen anchor, not a tuning
+        # knob: with uniform priors `mcts40` lands *below* `greedy` and the
+        # ladder stops being monotone (docs/AI_DESIGN.md §1.7).
+        assert bot.evaluator.priors == A.ANCHOR_PRIORS == "heuristic"
         other = A.make_bot("mcts160")
         for field in ("c_puct", "universes", "root", "deck_reserve_penalty"):
             assert getattr(bot.cfg, field) == getattr(other.cfg, field)

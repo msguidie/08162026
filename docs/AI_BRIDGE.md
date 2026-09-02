@@ -14,7 +14,7 @@ Env on the worker: `SERVER_URL`, `AI_WORKER_SECRET`, `MODEL_DIR`, `DEVICE` (cuda
 | worker→server | `ai_worker_register` | `{ secret, name, version, modes: ["INDIVIDUAL","ONE_V_TWO","TEAM"] }` | `{ ok: true }` or `{ error }` |
 | server→worker | `ai_move_request` | `{ requestId, roomId, playerIndex, kind: "MOVE" \| "TILE", deadlineMs, state, knownReserved, pendingTileChoice }` | — |
 | worker→server | `ai_move_response` | `{ requestId, action, info?: { policy?: number, value?: number, sims?: number, ms?: number } }` | `{ ok }` or `{ error }` |
-| server→worker | `ai_move_cancel` | `{ requestId }` (game ended / room gone) | — |
+| server→worker | `ai_move_cancel` | `{ requestId }` (game ended, room gone, deadline passed, or the position moved on) | — |
 
 `state` = `clientView(room.gameState)` for that seat with OTHER seats' reserved cards replaced by
 `{ id: <cardId or -1>, tier, hidden: true, known: <bool> }`; `knownReserved` = list of card ids that were reserved
@@ -39,7 +39,9 @@ timer update, consumeTurnTime, increment, broadcastProcessedAction, replay recor
 rejected by `processAction`, the server logs it and uses the fallback.
 
 Only one worker is active at a time (a new registration replaces the old one). Disconnect → `aiAvailable=false`;
-games in progress continue with the fallback policy for bot seats.
+games in progress continue with the fallback policy for bot seats. Both edges of `available` (first worker
+registers / last worker disconnects) re-broadcast the lobby, so `aiAvailable` is never stale for members already
+sitting in it.
 
 ## 2. Fallback policy (server, `aiFallback.js`)
 Deterministic greedy used when no worker is connected, the worker times out, or returns an invalid action:
@@ -69,9 +71,17 @@ non-existent socket id are harmless no-ops; `isPlayerConnected` stays true so cl
 
 Turn driver (`aiBridge.maybeAct(room)`): called after `game_start` emission and after every `broadcastProcessedAction`.
 If `phase === 'PLAYING'`, the current seat is a bot, and no request is in flight for the room → wait 600 ms
-(UX pacing) → send `ai_move_request` (kind `TILE` when `room.gameState._pendingTileChoice` is set) → apply the
-response → the normal broadcast triggers the next `maybeAct`. Guard against re-entrancy and stale responses
-(room deleted, game over, turn changed) via `requestId`.
+(UX pacing) → send `ai_move_request` → apply the response → the normal broadcast triggers the next `maybeAct`.
+Guard against re-entrancy and stale responses (room deleted, game over, turn changed) via `requestId`.
+
+- **Request kind.** `TILE` only when a noble choice is *actionable*: `_pendingTileChoice` non-empty **and**
+  `turnAction.type === 'BUY'`, which is what `processAction` requires to accept `CHOOSE_TILE`. A pending choice
+  left behind by a gem take or a reserve (docs/KNOWN_ISSUES.md §1) can never be answered, so the bridge asks for a
+  `MOVE`, the seat plays on, and it is not treated as a stalled turn — a bot is never resigned over it.
+- **Superseded requests.** If `currentPlayerIndex` or `turnNumber` changes while a request is in flight (a human
+  resigns, a timeout eliminates a seat, the bot seat itself is resigned), the next `maybeAct` cancels it
+  (`ai_move_cancel`), refuses any late answer for that `requestId`, and issues a fresh request for the seat that is
+  really to move.
 
 ## 4. Replays
 Bot seats are recorded like any other seat with `ai: true` in `players[]` of the replay file.

@@ -216,6 +216,31 @@ def test_state_bytes_round_trip_every_field():
     assert max(sizes) < 400                              # compact records
 
 
+def test_state_bytes_keep_a_result_whose_reason_is_none():
+    """A ``game_result`` with a ``None`` reason must survive the round trip.
+
+    Format v1 encoded that reason as code 0 — the same byte that means "no
+    game_result at all" — so ``from_bytes`` dropped the whole result.
+    """
+    s = E.new_game(4, "TEAM", "ADJACENT", rng=random.Random(5))
+    s.phase = E.PHASE_GAME_OVER
+    s.game_result = {"reason": None, "forfeitingTeamId": 1,
+                     "winningTeamIds": [0]}
+    blob = s.to_bytes()
+    copy = E.GameState.from_bytes(blob)
+    assert copy.game_result == s.game_result
+    assert copy.to_bytes() == blob                   # and it is stable
+
+    # A reason string the table does not know shares that code: the string is
+    # not stored, but the result itself still comes back.
+    s.game_result = {"reason": "ABANDONED"}
+    assert E.GameState.from_bytes(s.to_bytes()).game_result == {"reason": None}
+
+    # "no result at all" is still its own encoding.
+    s.game_result = None
+    assert E.GameState.from_bytes(s.to_bytes()).game_result is None
+
+
 def test_state_bytes_reject_a_foreign_version():
     s = E.new_game(2, rng=random.Random(1))
     blob = bytearray(s.to_bytes())

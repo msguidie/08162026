@@ -83,6 +83,40 @@ def test_unknown_key_raises():
         load_config(None, ["selfplay.mode_mixture={ind9: 1.0}"])
 
 
+def test_unknown_set_key_names_the_flag():
+    # `scripts/nscc_train.pbs` used to pass `--set job_id=...`; a scheduler id
+    # is not a config leaf and the failure has to say so, naming the override.
+    with pytest.raises(ValueError) as exc:
+        load_config(None, ["job_id=12345.pbs101"])
+    message = str(exc.value)
+    assert "--set" in message and "job_id" in message and "RunConfig" in message
+    assert "run_dir" in message                    # the known keys are listed
+
+    with pytest.raises(ValueError) as exc:
+        load_config(None, ["selfplay.actorz=4"])
+    assert "SelfPlayConfig" in str(exc.value) and "actorz" in str(exc.value)
+
+    with pytest.raises(ValueError) as exc:
+        load_config(None, ["run_dir.sub=1"])
+    assert "not a section" in str(exc.value)
+
+    # …while the shapes the PBS script really uses keep working.
+    cfg = load_config(None, ["run_dir=runs/nscc",
+                             "selfplay.mode_mixture={ind2: 1.0}"])
+    assert cfg.run_dir == "runs/nscc"
+
+
+def test_job_id_comes_from_the_environment(monkeypatch):
+    from splendor_ai.selfplay import train as train_mod
+
+    monkeypatch.delenv(train_mod.JOB_ID_ENV, raising=False)
+    assert train_mod.job_id() is None
+    monkeypatch.setenv(train_mod.JOB_ID_ENV, "  12345.pbs101  ")
+    assert train_mod.job_id() == "12345.pbs101"
+    monkeypatch.setenv(train_mod.JOB_ID_ENV, "")
+    assert train_mod.job_id() is None
+
+
 def test_win_threshold_is_individual_only():
     with pytest.raises(ValueError):
         load_config(None, ["selfplay.win_threshold=8",

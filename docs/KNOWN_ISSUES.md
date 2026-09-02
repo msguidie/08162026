@@ -9,6 +9,10 @@ none were fixed unless noted, to respect the "additive only" rule.
    not advance, and the player can keep acting until a buy resolves it. Hit 16 times in 16,000 random games.
    Suggested one-line fix: accept `CHOOSE_TILE` whenever `_pendingTileChoice` contains the tile (drop the `BUY` check).
    The Python engine mirrors the current behaviour exactly (so the AI is trained on the real rules).
+   *Still unfixed in the engine* (the rule change is yours to make), but the AI bridge no longer breaks on it:
+   `aiBridge.maybeAct` asks for `kind: "MOVE"` — not the impossible `TILE` — whenever `turnAction?.type !== 'BUY'`,
+   and a completed move in that state is progress, not a stall, so a bot seat is never resigned over a choice the
+   server would refuse. A human seat still has to play on until a buy resolves it.
 2. **Resigned seat can receive the winner's rating delta.** `calculateRatingChanges` ranks all seats by score/cards and
    ignores `resignedPlayers`. Accounts are unaffected when the game ends *on* the resign (the server excludes resigned
    seats there), but if an INDIVIDUAL game ends by score after an earlier resignation the resigned account is credited.

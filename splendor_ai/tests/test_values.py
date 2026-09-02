@@ -223,13 +223,67 @@ def test_standings_values_for_team_modes():
     tie = _game(4, "TEAM", "OPPOSITE", scores=[7, 7, 7, 7], cards=[4, 4, 4, 4])
     assert V.standings_values(tie).tolist() == [0.0, 0.0, 0.0, 0.0]
 
-    # 1v2 compares how far each side is past its own threshold.
-    solo_ahead = _game(3, "ONE_V_TWO", scores=[12, 6, 6])
-    assert V.standings_values(solo_ahead).tolist() == [1.0, -1.0, -1.0, 0.0]
-    duo_ahead = _game(3, "ONE_V_TWO", scores=[2, 12, 12])
-    assert V.standings_values(duo_ahead).tolist() == [-1.0, 1.0, 1.0, 0.0]
-    level = _game(3, "ONE_V_TWO", scores=[10, 14, 15])
-    assert V.standings_values(level).tolist() == [0.0, 0.0, 0.0, 0.0]
+    # cards break a total tie, fewer is better
+    cards_tie = _game(4, "TEAM", "ADJACENT", scores=[7, 7, 7, 7],
+                      cards=[5, 5, 4, 4])
+    assert V.standings_values(cards_tie).tolist() == [-1.0, -1.0, 1.0, 1.0]
+
+
+def test_standings_values_for_team_are_symmetric():
+    """Both TEAM sides need the same 30 points, so swapping the two sides has
+    to negate the vector — no side may be favoured by the comparison."""
+    for scores, cards in ([9, 9, 4, 4], [6, 6, 3, 3]), ([2, 5, 9, 1], [4, 4, 4, 4]):
+        a = V.standings_values(_game(4, "TEAM", "ADJACENT",
+                                     scores=scores, cards=cards))
+        swapped = [scores[2], scores[3], scores[0], scores[1]]
+        swapped_cards = [cards[2], cards[3], cards[0], cards[1]]
+        b = V.standings_values(_game(4, "TEAM", "ADJACENT",
+                                     scores=swapped, cards=swapped_cards))
+        assert np.allclose(a, -b)
+
+
+# ── 1v2 truncation: progress towards two different thresholds ─────────────
+
+def test_standings_values_1v2_equal_progress_is_neutral():
+    """15 and 34 are the two thresholds, so 6 solo points and 14 duo points are
+    the same fraction of the way home; the old `(solo-15)-(duo-34)` margin
+    scored this +1 for the solo because of the constant 19-point offset."""
+    s = _game(3, "ONE_V_TWO", scores=[6, 7, 7])          # 0.400 vs 0.412
+    z = V.standings_values(s)
+    assert abs(float(z[0])) < 0.05
+    assert np.allclose(z[1:3], -z[0]) and z[3] == 0.0
+
+
+def test_standings_values_1v2_solo_progress_wins():
+    s = _game(3, "ONE_V_TWO", scores=[10, 5, 5])          # 10/15 vs 10/34
+    z = V.standings_values(s)
+    assert z[0] > 0.0 and np.allclose(z[0], 2 * (10 / 15 - 10 / 34))
+    assert np.allclose(z[1:3], -z[0]) and z[3] == 0.0
+
+
+def test_standings_values_1v2_duo_progress_wins():
+    s = _game(3, "ONE_V_TWO", scores=[5, 15, 15])         # 5/15 vs 30/34
+    z = V.standings_values(s)
+    assert z[0] < 0.0 and z[1] > 0.0 and z[2] > 0.0
+    assert float(z.min()) >= -1.0 and float(z.max()) <= 1.0
+
+
+def test_standings_values_1v2_use_the_real_rule_once_a_side_qualifies():
+    """Past a threshold the engine's own resolver decides the game, so the
+    standings say exactly what the end of the round will."""
+    both_tied = _game(3, "ONE_V_TWO", scores=[15, 17, 17])   # excess 0 vs 0
+    assert V.standings_values(both_tied).tolist() == [0.0, 0.0, 0.0, 0.0]
+
+    solo_by_one = _game(3, "ONE_V_TWO", scores=[16, 17, 17])  # excess 1 vs 0
+    assert V.standings_values(solo_by_one).tolist() == [1.0, -1.0, -1.0, 0.0]
+
+    duo_only = _game(3, "ONE_V_TWO", scores=[9, 20, 20])      # duo qualified
+    assert V.standings_values(duo_only).tolist() == [-1.0, 1.0, 1.0, 0.0]
+
+    for state in (both_tied, solo_by_one, duo_only):
+        assert (V.standings_values(state).tolist()
+                == V._team_side_values(
+                    state, E.resolve_one_vs_two_winners(state)).tolist())
 
 
 def test_truncation_weight_is_the_documented_one():

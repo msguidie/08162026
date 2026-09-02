@@ -467,6 +467,54 @@ async function run() {
     assertEqual((await api('/api/replays/game-does-not-exist/raw')).status, 404);
   });
 
+  await test('a replay id that is not a room id is a 404, never a path', async () => {
+    // `game-<startMs>-<rand>` is the only accepted shape: no traversal, no
+    // encoded separator, no index.json, nothing that could steer a lookup.
+    const ids = [
+      '..%2F..%2Fetc%2Fpasswd',
+      '..%2Findex',
+      encodeURIComponent('../index.json'),
+      encodeURIComponent('game-1725280000000-ab12/../../index'),
+      'index.json',
+      'game-x-ab12',
+      'game-1725280000000-AB12',
+      'game-1725280000000-waytoolongrandom',
+      encodeURIComponent('game-1725280000000-ab12 '),
+      '%2E%2E%2F',
+    ];
+    for (const id of ids) {
+      assertEqual((await api(`/api/replays/${id}`)).status, 404, `frames ${id}`);
+      assertEqual((await api(`/api/replays/${id}/raw`)).status, 404, `raw ${id}`);
+    }
+    // …and the well-formed shape still reaches the store (404 = not stored).
+    assertEqual((await api('/api/replays/game-1725280000000-ab12')).status, 404);
+  });
+
+  await test('bot names are reserved for the AI bridge', async () => {
+    for (const username of ['Bot Alpha', 'Bot Beta', 'Bot Gamma', 'Bot Delta', '  Bot Alpha  ']) {
+      const created = await api('/api/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username }),
+      });
+      assertEqual(created.status, 409, `POST /api/accounts ${JSON.stringify(username)}`);
+      assertEqual(created.body.error, 'That username is reserved for AI players');
+    }
+    const accounts = (await api('/api/accounts')).body;
+    assertEqual(accounts.filter(account => account.username.startsWith('Bot ')), [], 'no bot account was created');
+
+    const impostor = await connect('e2e-impostor');
+    assertEqual(await emitAck(impostor, 'login', { username: 'Bot Alpha' }),
+      { error: 'Bot accounts cannot be used to log in' }, 'login as a bot is refused');
+    // …and the refused login never re-binds the socket to the bot seat.
+    const entered = await emitAck(impostor, 'enter_lobby');
+    assertEqual(entered.action, 'lobby');
+    assertEqual(entered.lobbyState.players.map(player => player.username), ['e2e-impostor'],
+      'the socket keeps its own identity');
+    impostor.socket.disconnect();
+    await sleep(60);
+  });
+
   suite('replay e2e — 2 player INDIVIDUAL');
 
   let individualClients = null;

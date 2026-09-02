@@ -3,7 +3,17 @@
 # splendor_ai — self-play training on one NSCC ASPIRE 2A "ai" node
 #                (4x A100-40GB, 64 cores, 440 GB), as a SELF-CHAINING job.
 #
-# Submit it with:      qsub splendor_ai/scripts/nscc_train.pbs
+# Submit it with:
+#     qsub -P <project> -v PROJECT=<project> splendor_ai/scripts/nscc_train.pbs
+#     ^ ASPIRE 2A refuses a job with no project code.  Both halves are needed:
+#       -P charges THIS job, PROJECT=... is passed on so the chain can charge
+#       the next one (a #PBS directive cannot read an environment variable, so
+#       the script cannot fill -P in for you -- see PROJECT= below).
+# A short smoke link (walltime is a directive too, so override it on the
+# command line rather than editing this file):
+#     qsub -P <project> -l walltime=00:30:00 \
+#          -v PROJECT=<project>,TRAIN_TIMEOUT=25m,MAX_CHAIN=0 \
+#          splendor_ai/scripts/nscc_train.pbs
 # Watch it with:       qstat -answ1 $USER
 # Stop the chain with: touch STOP            (in the repository root)
 #
@@ -41,9 +51,13 @@
 #        (splendor-train.oNNNNNN in the submission directory).
 
 ## #PBS -P personal-<nusnetid>
-#      ^ project/account to charge.  NSCC requires one; uncomment and fill in
-#        yours (or pass it on the command line: qsub -P personal-abc123 ...).
-#        Left commented so the script also works on sites without accounting.
+#      ^ project/account to charge.  NSCC ASPIRE 2A REQUIRES one.  PBS reads
+#        these directives before any shell expansion, so `#PBS -P $PROJECT`
+#        would submit a job literally charged to "$PROJECT" -- the code has to
+#        come from the qsub command line (`qsub -P personal-abc123 ...`).
+#        Either uncomment this line with your code hard-wired, or pass -P;
+#        the PROJECT variable below is checked at start-up either way, and is
+#        what the self-chaining qsub at the bottom re-uses.
 
 ## #PBS -M you@example.com
 ## #PBS -m abe
@@ -71,6 +85,24 @@ CHAIN="${CHAIN:-0}"
 MAX_CHAIN="${MAX_CHAIN:-30}"
 # Leave the trainer 20 minutes to finish its last checkpoint before PBS's axe.
 TRAIN_TIMEOUT="${TRAIN_TIMEOUT:-23h}"
+# NSCC project code to charge.  Passed in with `qsub -v PROJECT=...` (and, for
+# THIS job, `qsub -P ...`); the chain below hands it to its successor.  A
+# submission that left it at the placeholder is stopped here, rather than
+# burning a queue slot on a job PBS would reject anyway.
+# PBS Pro exports the project of the running job, so a submission made with
+# `qsub -P <code>` alone is accepted too; -v PROJECT=... is what keeps the
+# code available for the *next* link of the chain.
+PROJECT="${PROJECT:-${PBS_PROJECT:-${PBS_ACCOUNT:-changeme}}}"
+
+if [ "${PROJECT}" = "changeme" ]; then
+    echo "ERROR: no NSCC project code." >&2
+    echo "       ASPIRE 2A charges every job to a project (#PBS -P)." >&2
+    echo "       Submit as:" >&2
+    echo "         qsub -P <project> -v PROJECT=<project> splendor_ai/scripts/nscc_train.pbs" >&2
+    echo "       Your codes are in the NSCC welcome mail (a personal" >&2
+    echo "       allocation is usually personal-<nusnetid>)." >&2
+    exit 2
+fi
 
 mkdir -p "${LOG_DIR}"
 JOB_TAG="${PBS_JOBID:-local.$(date +%Y%m%d-%H%M%S)}"
@@ -81,6 +113,7 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo "=== splendor-train ========================================="
 echo "job        : ${JOB_TAG}   chain link ${CHAIN}/${MAX_CHAIN}"
+echo "project    : ${PROJECT}"
 echo "node       : $(hostname)"
 echo "workdir    : ${REPO_ROOT}"
 echo "run dir    : ${RUN_DIR}"
@@ -160,12 +193,19 @@ fi
 # write a checkpoint instead of being SIGKILLed mid-write.
 echo "--- starting training (self-imposed limit ${TRAIN_TIMEOUT})"
 START_TS=$(date +%s)
+# The trainer's flags are exactly: --config, --resume, --set, --evaluate,
+# --warm-start, --print-config.  `--set KEY=VALUE` writes into the config tree
+# and REFUSES a key RunConfig does not have, so the job id -- which is not a
+# config leaf -- travels in the environment instead and is recorded in
+# metrics.jsonl (the "run" and "summary" lines).  `--resume ${RUN_DIR}` already
+# implies `run_dir=${RUN_DIR}`; the explicit override is what points a *fresh*
+# run at this directory instead of at the config's own run_dir.
+export SPLENDOR_JOB_ID="${JOB_TAG}"
 timeout --signal=INT --kill-after=10m "${TRAIN_TIMEOUT}" \
     python -m splendor_ai.selfplay.train \
         --config "${CONFIG}" \
         ${RESUME_ARG} \
-        --set run_dir="${RUN_DIR}" \
-        --set job_id="${JOB_TAG}"
+        --set run_dir="${RUN_DIR}"
 STATUS=$?
 END_TS=$(date +%s)
 echo "--- training exited with status ${STATUS} after $(( (END_TS - START_TS) / 60 )) min"
@@ -189,7 +229,8 @@ elif [ "${MAX_CHAIN}" -le 0 ] || [ "${CHAIN}" -ge "${MAX_CHAIN}" ]; then
     echo "=== chain limit reached (${CHAIN}/${MAX_CHAIN}) — not re-submitting."
 elif [ "${STATUS}" -ne 0 ] && [ "${STATUS}" -ne 124 ]; then
     echo "=== training failed (status ${STATUS}) — NOT re-submitting."
-    echo "    inspect ${LOG_FILE}, then: qsub splendor_ai/scripts/nscc_train.pbs"
+    echo "    inspect ${LOG_FILE}, then:"
+    echo "    qsub -P ${PROJECT} -v PROJECT=${PROJECT} splendor_ai/scripts/nscc_train.pbs"
 else
     NEXT=$(( CHAIN + 1 ))
     echo "=== submitting chain link ${NEXT}"
@@ -199,7 +240,8 @@ else
     #  runs; end-of-job submission is used here because it can look at the
     #  exit status first.)
     cd "${REPO_ROOT}" && qsub \
-        -v CHAIN=${NEXT},MAX_CHAIN=${MAX_CHAIN},RUN_DIR=${RUN_DIR},CONFIG=${CONFIG},ENV_NAME=${ENV_NAME} \
+        -P "${PROJECT}" \
+        -v CHAIN=${NEXT},MAX_CHAIN=${MAX_CHAIN},RUN_DIR=${RUN_DIR},CONFIG=${CONFIG},ENV_NAME=${ENV_NAME},PROJECT=${PROJECT} \
         splendor_ai/scripts/nscc_train.pbs \
         && echo "    submitted." \
         || echo "    qsub failed — resubmit by hand."

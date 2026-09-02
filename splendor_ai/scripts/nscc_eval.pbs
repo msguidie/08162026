@@ -3,11 +3,17 @@
 # splendor_ai — arena evaluation of a checkpoint against the pinned anchor
 #                ladder, in every mode, on ONE GPU of an ASPIRE 2A ai node.
 #
-# Submit it with:
-#     qsub splendor_ai/scripts/nscc_eval.pbs                    # latest weights
-#     qsub -v CKPT=runs/nscc/checkpoints/gen_0040.pt \
+# Submit it with (ASPIRE 2A charges every job to a project, so -P is not
+# optional; -v PROJECT=... only matters if a script re-submits anything):
+#     qsub -P <project> splendor_ai/scripts/nscc_eval.pbs        # latest weights
+#     qsub -P <project> -v CKPT=runs/nscc/checkpoints/gen_0040.pt \
 #          splendor_ai/scripts/nscc_eval.pbs                    # a milestone
-#     qsub -v GAMES=400,SIMS=800,EXPORT=1 splendor_ai/scripts/nscc_eval.pbs
+#     qsub -P <project> -v GAMES=400,SIMS=800,EXPORT=1 \
+#          splendor_ai/scripts/nscc_eval.pbs
+# A short check on the queue (walltime is a #PBS directive and cannot read an
+# environment variable, so shorten it on the command line):
+#     qsub -P <project> -l walltime=00:30:00 -v GAMES=20,MODES=ind2 \
+#          splendor_ai/scripts/nscc_eval.pbs
 #
 # Output: reports/arena_<tag>.md and .json (plus dist/model/ if EXPORT=1).
 #
@@ -33,7 +39,11 @@
 #      ^ one joined log file, splendor-eval.oNNNNNN, in the submission dir.
 
 ## #PBS -P personal-<nusnetid>
-#      ^ uncomment and fill in your NSCC project code (or pass -P to qsub).
+#      ^ your NSCC project code.  REQUIRED on ASPIRE 2A.  PBS parses these
+#        directives before any shell expansion, so it cannot be driven by an
+#        environment variable: either uncomment this line with your code
+#        hard-wired, or pass `qsub -P personal-abc123 ...`.  The PROJECT
+#        variable below checks that one of the two happened.
 
 set -uo pipefail
 
@@ -54,6 +64,19 @@ EXPORT="${EXPORT:-0}"                            # 1 = also write dist/model/
 ENV_NAME="${ENV_NAME:-splendor}"
 REPORT_DIR="${REPORT_DIR:-reports}"
 LOG_DIR="${RUN_DIR}/logs"
+# NSCC project code to charge.  PBS Pro exports the running job's project, so
+# `qsub -P <code>` on its own is enough; -v PROJECT=... is the manual override.
+PROJECT="${PROJECT:-${PBS_PROJECT:-${PBS_ACCOUNT:-changeme}}}"
+
+if [ "${PROJECT}" = "changeme" ]; then
+    echo "ERROR: no NSCC project code." >&2
+    echo "       ASPIRE 2A charges every job to a project (#PBS -P)." >&2
+    echo "       Submit as:" >&2
+    echo "         qsub -P <project> splendor_ai/scripts/nscc_eval.pbs" >&2
+    echo "       Your codes are in the NSCC welcome mail (a personal" >&2
+    echo "       allocation is usually personal-<nusnetid>)." >&2
+    exit 2
+fi
 
 mkdir -p "${REPORT_DIR}" "${LOG_DIR}"
 JOB_TAG="${PBS_JOBID:-local.$(date +%Y%m%d-%H%M%S)}"
@@ -65,6 +88,7 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo "=== splendor-eval =========================================="
 echo "job        : ${JOB_TAG}"
+echo "project    : ${PROJECT}"
 echo "node       : $(hostname)"
 echo "checkpoint : ${CKPT}"
 echo "modes      : ${MODES}"

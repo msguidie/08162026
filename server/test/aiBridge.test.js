@@ -3,7 +3,7 @@
 // the turn really advances, but nothing is broadcast.
 
 const { suite, test, assert, assertEqual } = require('./harness');
-const { createInitialGameState, processAction, ALL_CARDS, ALL_BONUS_TILES } = require('../gameLogic');
+const { createInitialGameState, processAction, processResign, ALL_CARDS, ALL_BONUS_TILES } = require('../gameLogic');
 const aiBridge = require('../aiBridge');
 
 const SECRET = 'unit-test-secret';
@@ -65,6 +65,56 @@ function makeWorld() {
     },
   });
   return { room, applied, resigned };
+}
+
+// A 4-player room whose seats 1 and 2 are bots; seat 1 is to move.
+// Two human seats keep the game alive while seats resign one after another.
+function makeBotWorld() {
+  const gameState = createInitialGameState(
+    [
+      { username: 'human', avatarSeed: 1 },
+      { username: 'Bot Alpha', avatarSeed: 2 },
+      { username: 'Bot Beta', avatarSeed: 3 },
+      { username: 'human-2', avatarSeed: 4 },
+    ],
+    { gameMode: 'INDIVIDUAL', unlimitedTime: true },
+  );
+  gameState.currentPlayerIndex = 1;
+  gameState.roundStartPlayer = 0;
+  const room = {
+    id: 'room-unit-multi',
+    gameState,
+    playerSockets: [
+      { socketId: 'human-socket', username: 'human', playerIndex: 0 },
+      { socketId: 'ai:1', username: 'Bot Alpha', playerIndex: 1, isAI: true },
+      { socketId: 'ai:2', username: 'Bot Beta', playerIndex: 2, isAI: true },
+      { socketId: 'human-socket-2', username: 'human-2', playerIndex: 3 },
+    ],
+  };
+  const applied = [];
+  const resigned = [];
+  aiBridge.init({
+    getRoom: id => (id === room.id ? room : null),
+    applyGameAction: (target, playerIndex, action) => {
+      const result = processAction(target.gameState, playerIndex, action);
+      if (result.error) return { error: result.error };
+      applied.push({ playerIndex, action });
+      return { ok: true };
+    },
+    resignPlayer: (target, playerIndex) => {
+      resigned.push(playerIndex);
+      processResign(target.gameState, playerIndex);
+      return { ok: true };
+    },
+  });
+  return { room, applied, resigned };
+}
+
+// Records every availability flip the bridge reports to the server.
+function trackAvailability() {
+  const flips = [];
+  aiBridge.init({ onAvailabilityChange: available => flips.push(available) });
+  return flips;
 }
 
 function freshBridge({ enabled = true, delayMs = 1, deadlineMs = 5000 } = {}) {
@@ -130,6 +180,27 @@ async function run() {
     second.socket.trigger('disconnect');
     assertEqual(aiBridge.isAvailable(), false, 'disconnect clears the worker');
     assertEqual(aiBridge.status(), { enabled: true, available: false });
+  });
+
+  await test('reports every availability flip so the lobby can be re-broadcast', async () => {
+    freshBridge();
+    const flips = trackAvailability();
+
+    const first = registerWorker('gpu-1', 'socket-a1');
+    assertEqual(flips, [true], 'the first worker makes AI available');
+
+    const second = registerWorker('gpu-2', 'socket-a2');
+    assertEqual(flips, [true], 'a replacement worker is not a flip');
+
+    first.socket.trigger('disconnect');
+    assertEqual(flips, [true], 'the replaced socket going away is not a flip');
+
+    second.socket.trigger('disconnect');
+    assertEqual(flips, [true, false], 'the last worker leaving is');
+    assertEqual(aiBridge.isAvailable(), false);
+
+    registerWorker('gpu-3', 'socket-a3');
+    assertEqual(flips, [true, false, true], 'and a fresh worker flips it back');
   });
 
   suite('aiBridge — turn driver');
@@ -281,6 +352,78 @@ async function run() {
     assertEqual(aiBridge._inFlightCount(), 0, 'released');
   });
 
+  await test('asks for a MOVE while an orphaned noble choice is pending', async () => {
+    // docs/KNOWN_ISSUES.md §1: a gem take or a reserve can leave
+    // `_pendingTileChoice` set with `turnAction` back to null. CHOOSE_TILE is
+    // refused by the engine in that state, so the bridge must ask for a MOVE
+    // — and the seat must never be resigned over it.
+    freshBridge();
+    const { room, applied, resigned } = makeBotWorld();
+    // Hand-built orphan: pending choice, turnAction null, turn not advanced.
+    room.gameState.bonusTiles = ALL_BONUS_TILES.slice(0, 2);
+    room.gameState._pendingTileChoice = room.gameState.bonusTiles.map(tile => tile.id);
+    room.gameState.turnAction = null;
+
+    const { socket } = registerWorker('unit-worker', 'socket-orphan');
+    aiBridge.maybeAct(room);
+    await sleep(25);
+
+    const request = socket.lastOf('ai_move_request');
+    assertEqual(request.kind, 'MOVE', 'CHOOSE_TILE is impossible here — ask for a move');
+    assertEqual(request.pendingTileChoice, room.gameState._pendingTileChoice,
+      'the orphaned choice is still reported to the worker');
+
+    socket.trigger('ai_move_response', {
+      requestId: request.requestId, action: { type: 'TAKE_GEMS', colors: [0, 1, 2] },
+    }, () => {});
+
+    assertEqual(applied, [{ playerIndex: 1, action: { type: 'TAKE_GEMS_CONFIRMED', colors: [0, 1, 2] } }],
+      'the ordinary move went through');
+    assertEqual(resigned, [], 'the seat was not resigned over the pending choice');
+    assertEqual(room.gameState.currentPlayerIndex, 2, 'the turn moved on');
+
+    // …and the next bot seat is driven normally afterwards.
+    await sleep(25);
+    assertEqual(socket.lastOf('ai_move_request').playerIndex, 2, 'the next bot seat was asked');
+  });
+
+  await test('a move that re-opens an orphaned noble choice is not a stall', async () => {
+    // The real shape of the gap: the seat qualifies for two nobles, so every
+    // completed gem take re-arms `_pendingTileChoice` and keeps the turn.
+    freshBridge();
+    const { room, applied, resigned } = makeBotWorld();
+    const byReward = reward => ALL_CARDS.filter(card => card.reward === reward && card.tier === 1).slice(0, 4);
+    room.gameState.players[1].cards = [...byReward(0), ...byReward(1), ...byReward(2)];
+    const discount = [0, 0, 0, 0, 0];
+    for (const card of room.gameState.players[1].cards) discount[card.reward]++;
+    const qualifying = ALL_BONUS_TILES.filter(tile =>
+      tile.requirement.every((need, color) => discount[color] >= need));
+    assert(qualifying.length >= 2, 'fixture qualifies for two nobles');
+    room.gameState.bonusTiles = qualifying.slice(0, 2);
+
+    const { socket } = registerWorker('unit-worker', 'socket-orphan-2');
+    aiBridge.maybeAct(room);
+    await sleep(25);
+    const first = socket.lastOf('ai_move_request');
+    assertEqual(first.kind, 'MOVE');
+    socket.trigger('ai_move_response', {
+      requestId: first.requestId, action: { type: 'TAKE_GEMS', colors: [0, 1, 2] },
+    }, () => {});
+
+    assertEqual(applied.length, 1, 'the take was applied');
+    assertEqual(room.gameState.turnAction, null, 'and left the turn action empty');
+    assertEqual(room.gameState._pendingTileChoice, qualifying.slice(0, 2).map(tile => tile.id),
+      'while arming a choice the engine will not accept');
+    assertEqual(room.gameState.currentPlayerIndex, 1, 'the seat keeps the turn');
+    assertEqual(resigned, [], 'and is not resigned for it');
+
+    await sleep(25);
+    assertEqual(socket.countOf('ai_move_request'), 2, 'the seat is asked to play on');
+    const second = socket.lastOf('ai_move_request');
+    assertEqual(second.kind, 'MOVE', 'still a MOVE, never an impossible TILE');
+    assertEqual(second.playerIndex, 1);
+  });
+
   suite('aiBridge — fallback paths');
 
   await test('falls back to the greedy policy when no worker is connected', async () => {
@@ -428,6 +571,56 @@ async function run() {
     await sleep(25);
     assertEqual(socket.countOf('ai_move_request'), 1, 'exactly one request');
     assertEqual(applied.length, 0, 'nothing applied yet');
+  });
+
+  await test('cancels an in-flight request when the position moves on', async () => {
+    freshBridge({ delayMs: 1, deadlineMs: 5000 });
+    const { room, applied, resigned } = makeBotWorld();
+    const { socket } = registerWorker('unit-worker', 'socket-supersede');
+
+    aiBridge.maybeAct(room);
+    await sleep(25);
+    const first = socket.lastOf('ai_move_request');
+    assertEqual(first.playerIndex, 1, 'the bot seat to move was asked');
+
+    // A seat that is NOT to move resigning leaves the request alone.
+    processResign(room.gameState, 0);
+    aiBridge.maybeAct(room);
+    await sleep(20);
+    assertEqual(socket.countOf('ai_move_cancel'), 0, 'the position did not change');
+    assertEqual(socket.countOf('ai_move_request'), 1, 'and no second request went out');
+
+    // …but the bot seat itself being eliminated (timeout / resign) does: the
+    // turn is now seat 2's and the pending request can never be answered.
+    processResign(room.gameState, 1);
+    assertEqual(room.gameState.currentPlayerIndex, 2, 'the turn moved to the other bot');
+    aiBridge.maybeAct(room);
+
+    assertEqual(socket.countOf('ai_move_cancel'), 1, 'the worker was told to stop');
+    assertEqual(socket.lastOf('ai_move_cancel'), { requestId: first.requestId });
+
+    // A late answer for the superseded request is refused, not applied.
+    let ack = null;
+    socket.trigger('ai_move_response', {
+      requestId: first.requestId, action: { type: 'TAKE_GEMS', colors: [0, 1, 2] },
+    }, response => { ack = response; });
+    assertEqual(ack, { error: 'Unknown or expired request' }, 'the stale answer is ignored');
+    assertEqual(applied, [], 'nothing was applied for the eliminated seat');
+
+    // …and the seat that is really to move gets its own request.
+    await sleep(25);
+    assertEqual(socket.countOf('ai_move_request'), 2, 'a new request went out');
+    const second = socket.lastOf('ai_move_request');
+    assertEqual(second.playerIndex, 2, 'for the current seat');
+    assert(second.requestId !== first.requestId, 'with a new request id');
+
+    socket.trigger('ai_move_response', {
+      requestId: second.requestId, action: { type: 'TAKE_GEMS', colors: [0, 1, 2] },
+    }, () => {});
+    assertEqual(applied, [{ playerIndex: 2, action: { type: 'TAKE_GEMS_CONFIRMED', colors: [0, 1, 2] } }],
+      'the new seat played');
+    assertEqual(resigned, [], 'no bot seat was resigned by the bridge');
+    assertEqual(aiBridge._inFlightCount(), 0, 'released');
   });
 
   await test('does nothing at all while AI_WORKER_SECRET is unset', async () => {

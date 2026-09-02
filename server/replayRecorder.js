@@ -166,7 +166,18 @@ function individualWinners(state) {
     .map(entry => entry.index);
 }
 
-function buildResult(room) {
+// index.js only passes `excludeResigned` to applyRoomRatings when an INDIVIDUAL
+// game ends inside resignPlayer()/eliminateTimedOutPlayer() — i.e. the very last
+// thing that happened was that resignation or timeout. A game that ends on a
+// normal move credits every seat, resigned ones included, so the stored deltas
+// must follow the same rule.
+function endedOnResignation(recording) {
+  const actions = recording && Array.isArray(recording.actions) ? recording.actions : [];
+  const last = actions[actions.length - 1];
+  return Array.isArray(last) && (last[1] === 'X' || last[1] === 'T');
+}
+
+function buildResult(room, recording) {
   const state = room.gameState;
   const scores = state.players.map(player => player.score);
   const cards = state.players.map(player => player.cards.length);
@@ -189,9 +200,12 @@ function buildResult(room) {
 
   // An INDIVIDUAL game that ran out of active players ended by forfeit.
   const forfeited = resigned.length >= state.numPlayers - 1 && resigned.length > 0;
-  // index.js credits accounts with `excludeResigned` when an INDIVIDUAL game ends
-  // on a resignation/timeout, so a seat that resigned never earns a delta. Store
-  // what the server actually credited instead of the raw ranking.
+  // Mirror applyRoomRatings(room, excludeResigned): only the resign/timeout
+  // endings skip resigned seats. When the game ended on a normal move the server
+  // credited every seat, so store room.ratingChanges verbatim.
+  const rating = endedOnResignation(recording)
+    ? ratingChanges.map((delta, seat) => (resigned.includes(seat) ? 0 : delta))
+    : ratingChanges;
   return {
     scores,
     cards,
@@ -199,7 +213,7 @@ function buildResult(room) {
     winners: individualWinners(state),
     winningTeamIds: null,
     reason: forfeited ? 'FORFEIT' : 'SCORE',
-    rating: ratingChanges.map((delta, seat) => (resigned.includes(seat) ? 0 : delta)),
+    rating,
   };
 }
 
@@ -214,7 +228,7 @@ function finish(room) {
     if (!isRecordable(room)) return null;
 
     recording.e = Date.now();
-    recording.result = buildResult(room);
+    recording.result = buildResult(room, recording);
     replayStore.add(recording);
     return recording;
   });

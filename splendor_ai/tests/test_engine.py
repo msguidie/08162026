@@ -419,6 +419,30 @@ def test_team_resign_is_an_instant_forfeit():
     assert E.rating_changes(p.state) == [5, 5, 0, 0]
 
 
+def test_individual_winners_never_include_a_resigned_seat():
+    """``individual_winners`` is a port of ``individualWinners`` in
+    ``server/replayRecorder.js`` (the authoritative producer of a replay's
+    ``winners``), which ranks the *active* seats only.  A resigned seat is left
+    with 0 points and 0 cards, so ranking it would hand it every card tiebreak.
+    """
+    spec = position(n=3, gems=FULL_GEMS, current=1,
+                    players=[{"gems": [0] * 6,
+                              "cards": discount_cards([2, 0, 0, 0, 0])},
+                             {"gems": [0] * 6,
+                              "cards": discount_cards([0, 1, 0, 0, 0])},
+                             {"gems": [0] * 6,
+                              "cards": discount_cards([0, 0, 1, 0, 0])}])
+    p = run(spec, [["resign", 1], ["probe"]])
+    assert p.state.players[1].score == 0 and p.state.players[1].cards == []
+    # every seat is on 0 points: seat 1 has the fewest cards, but it resigned.
+    assert E.individual_winners(p.state) == [2]
+
+    E.resign(p.state, 0)
+    assert E.individual_winners(p.state) == [2]
+    E.resign(p.state, 2)
+    assert E.individual_winners(p.state) == []      # nobody is left to win
+
+
 def test_timeout_matches_the_server_elimination_path():
     spec = position(n=3, gems=FULL_GEMS, current=2,
                     players=[{"gems": [0] * 6}, {"gems": [0] * 6},

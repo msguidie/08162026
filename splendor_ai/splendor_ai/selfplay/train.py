@@ -59,6 +59,19 @@ from .replay import ReplayBuffer  # noqa: E402
 __all__ = ["Trainer", "main"]
 
 
+#: Batch schedulers (PBS, Slurm) have no place in the config tree — a job id is
+#: not a knob, it changes every run and `--set job_id=...` is rejected by
+#: RunConfig on purpose.  `scripts/nscc_train.pbs` exports it here instead and
+#: it is recorded in metrics.jsonl so a chained run can be traced link by link.
+JOB_ID_ENV = "SPLENDOR_JOB_ID"
+
+
+def job_id() -> Optional[str]:
+    """The batch job id this run belongs to, if the scheduler exported one."""
+    value = (os.environ.get(JOB_ID_ENV) or "").strip()
+    return value or None
+
+
 class Trainer:
     """Owns every process in the run."""
 
@@ -129,6 +142,7 @@ class Trainer:
             "algorithm": cfg.learner.algorithm,
             "win_threshold": cfg.selfplay.win_threshold,
             "resumed_step": self.learner.step,
+            **({"job_id": job_id()} if job_id() else {}),
         }, step=self.learner.step, generation=self.generation)
 
         if cfg.inference.mode == "server":
@@ -530,6 +544,8 @@ class Trainer:
             "throughput": self._throughput(),
             "evals": self.eval_history,
         }
+        if job_id():
+            summary["job_id"] = job_id()
         self.metrics.log("summary", summary, step=self.learner.step,
                          generation=self.generation)
         self.metrics.close()
@@ -575,7 +591,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     overrides = list(args.set)
     if args.resume:
         overrides.append(f"run_dir={args.resume}")
-    cfg = load_config(config_path, overrides)
+    try:
+        cfg = load_config(config_path, overrides)
+    except (ValueError, OSError) as exc:
+        # A typo in --set or a missing config file is a submission mistake, not
+        # a crash: say what is wrong on one line and exit non-zero (the PBS
+        # chain treats any status other than 0/124 as "do not re-submit").
+        print(f"[train] bad configuration: {exc}", file=sys.stderr, flush=True)
+        return 2
 
     if args.print_config:
         from .config import config_to_dict

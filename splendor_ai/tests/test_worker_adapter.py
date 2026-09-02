@@ -11,6 +11,7 @@ with the code under test.
 from __future__ import annotations
 
 import random
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -705,9 +706,118 @@ def test_the_deadline_shrinks_the_budget(tmp_path):
                    UNIVERSES=2, DEADLINE_MARGIN_MS=50)
     state = E.new_game(2, rng=random.Random(4))
     payload = build_observation(state, state.current_player)
-    payload["deadlineMs"] = time.time() * 1000.0 + 400
+    # Comfortably above SKEW_FLOOR_MS, so this is a real (short) deadline and
+    # not read as a skewed clock — see the next test.
+    payload["deadlineMs"] = time.time() * 1000.0 + 900
     started = time.monotonic()
     decision = agent.decide(payload)
     elapsed = (time.monotonic() - started) * 1000.0
     assert decision.level == "search"
-    assert elapsed < 2000, elapsed
+    assert elapsed < 2500, elapsed
+
+
+def test_a_skewed_server_clock_cannot_shrink_the_budget():
+    """`deadlineMs` is the SERVER's epoch clock; ours may be far from it."""
+    import time
+    from splendor_ai.worker.agent import MIN_BUDGET_MS, SKEW_FLOOR_MS
+
+    agent = _agent(TIME_BUDGET_MS=1500, HARD_BUDGET_MS=2500,
+                   DEADLINE_MARGIN_MS=400)
+    warnings: List[str] = []
+    agent.log = lambda level, message, **kw: (
+        warnings.append(message) if level == "warn" else None)
+    local_hard = 2.5
+
+    def budget(deadline_offset_ms, waited_ms=0.0):
+        started = time.monotonic() - waited_ms / 1000.0
+        soft, hard = agent._budgets(
+            {"deadlineMs": time.time() * 1000.0 + deadline_offset_ms}, started)
+        return (soft - started), (hard - started)
+
+    # A clock that runs minutes fast (or a stale deadline) is ignored.
+    for offset in (-600000.0, -5000.0, 0.0, SKEW_FLOOR_MS - 1.0):
+        soft, hard = budget(offset)
+        assert abs(hard - local_hard) < 1e-6, (offset, hard)
+        assert abs(soft - 1.5) < 1e-6, (offset, soft)
+    assert len(warnings) == 1, warnings          # logged once, not per move
+    assert "clock skew" in warnings[0]
+
+    # A real, short deadline still shortens the budget (margin subtracted).
+    soft, hard = budget(1500.0)
+    assert abs(hard - 1.1) < 0.05, hard
+    assert soft <= hard + 1e-9
+
+    # A deadline further away than the local budget never lengthens it.
+    soft, hard = budget(15000.0)
+    assert abs(hard - local_hard) < 1e-6, hard
+
+    # …and a request that really did queue behind another move honours what
+    # little is left: the skew rule only covers a request we just picked up.
+    soft, hard = budget(120.0, waited_ms=SKEW_FLOOR_MS + 100.0)
+    assert abs(hard - MIN_BUDGET_MS / 1000.0) < 1e-6, hard
+
+    # No deadline at all → the local budget.
+    started = time.monotonic()
+    soft, hard = agent._budgets({}, started)
+    assert abs((hard - started) - local_hard) < 1e-6
+
+
+def test_reconnecting_forgets_stale_cancellations(tmp_path):
+    """`_cancelled` belongs to one connection, not to the process.
+
+    A cancel that arrives after its answer has gone out is never claimed by a
+    handler, and the server restarts its request counter (`ai-1`, `ai-2`, ...)
+    when IT restarts — so a set carried across a reconnect would grow for ever
+    and could swallow a live request that happens to reuse an id.
+    """
+    pytest.importorskip("socketio")
+    from splendor_ai.worker.client import MoveLog, WorkerClient
+    from splendor_ai.worker.config import load_config
+
+    cfg = load_config(env={"MODEL_DIR": str(tmp_path), "DEVICE": "cpu",
+                           "LOG_DIR": str(tmp_path)}, use_dotenv=False)
+    client = WorkerClient(cfg, _agent(MODEL_DIR=str(tmp_path)),
+                          log=lambda *a, **k: None,
+                          move_log=MoveLog(tmp_path / "moves.jsonl"))
+    try:
+        handlers = client.sio.handlers["/"]
+        handlers["ai_move_cancel"]({"requestId": "ai-1"})
+        handlers["ai_move_cancel"]({"requestId": "ai-2"})
+        handlers["ai_move_cancel"](None)              # ignored, no crash
+        assert client._cancelled == {"ai-1", "ai-2"}
+
+        registered: List[bool] = []
+        client._register = lambda: registered.append(True)
+        handlers["connect"]()
+        assert client._cancelled == set(), "a reconnect starts from a clean set"
+        assert registered == [True], "and still registers"
+    finally:
+        client._pool.shutdown(wait=False)
+
+
+def test_warmup_covers_every_mode_the_worker_serves(tmp_path):
+    """The first request of *each* mode must not pay a cold start."""
+    pytest.importorskip("torch")
+    from splendor_ai.model import SMOKE_CONFIG, SplendorNet, save_checkpoint
+
+    agent = _agent(MODEL_DIR=str(tmp_path))
+    assert agent.warmup_keys() == ("ind2", "ind3", "ind4", "ovt", "team")
+    assert _agent(WORKER_MODES="INDIVIDUAL").warmup_keys() == (
+        "ind2", "ind3", "ind4")
+    assert _agent(WORKER_MODES="TEAM,ONE_V_TWO").warmup_keys() == (
+        "ovt", "team")
+    for key in agent.warmup_keys():               # every key builds a position
+        state = agent._warmup_position(key)
+        assert state.num_players >= 2 and E.legal_actions(state)
+
+    # One checkpoint per mode: each distinct file is searched exactly once.
+    save_checkpoint(str(tmp_path / "shared.pt"), SplendorNet(SMOKE_CONFIG))
+    save_checkpoint(str(tmp_path / "team.pt"), SplendorNet(SMOKE_CONFIG))
+    agent = _agent(MODEL_DIR=str(tmp_path), SEARCH_SIMS=2, UNIVERSES=1)
+    searched: List[str] = []
+    real_search = agent._search
+    agent._search = lambda state, seat, handle, soft, hard, decision: (
+        searched.append(Path(handle.path).name)
+        or real_search(state, seat, handle, soft, hard, decision))
+    agent.warmup()
+    assert sorted(searched) == ["shared.pt", "team.pt"], searched

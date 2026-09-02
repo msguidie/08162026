@@ -32,8 +32,18 @@ C、D 两节在训练系统与 worker 完成后补全（见 docs/PROGRESS.md）�
 ## B. 在 Render 上启用 AI 席位
 
 Render → Environment 添加 `AI_WORKER_SECRET=<一串随机长字符串>`（例如用密码管理器生成 32 位以上）。
-未设置时，大厅不会显示任何 AI 相关按钮；设置后大厅会显示 **Add AI**，但只有本地 worker 连上后按钮才可用
-（`/api/ai/status` 返回 `available: true`）。同一个 secret 要填到本地 worker 的 `.env`。
+同一个 secret 要填到本地 worker 的 `.env`。
+
+**按钮什么时候出现**：大厅的 **Add AI** 按钮只在服务器报告 `aiAvailable: true` 时才**渲染**（`WaitingRoom.tsx`），
+也就是「设了 secret **并且** 此刻有 worker 连着」；只设了 secret、worker 没连上时，大厅里根本看不到这个按钮，
+不是显示成灰色的禁用状态。判断链路：
+
+- `GET /api/ai/status` → `{"enabled":false,"available":false}`：Render 上没设 `AI_WORKER_SECRET`；
+- → `{"enabled":true,"available":false}`：secret 设了，但 worker 还没连上（按钮不出现）；
+- → `{"enabled":true,"available":true,"name":...}`：worker 已注册，按钮出现，可以点。
+
+worker 连上/断开时服务器会立刻把大厅状态重新广播一次，所以已经坐在大厅里的人不用刷新页面：
+按钮会自己出现或消失。（按钮出现之后仍可能是禁用态，那是另一回事：席位满了，或者已经加满 4 个机器人。）
 
 ## C. 本地 Windows 10/11 + RTX 3060 推理 worker
 
@@ -44,12 +54,19 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
 2. 把整个仓库（含 `splendor_ai/`）放到本机，例如 `C:\splendor`。在该目录打开 PowerShell：
 
    ```powershell
+   # 只需一次：允许运行本机自己生成的脚本，否则下一行的 Activate.ps1 会被
+   # 拦下（报 "cannot be loaded because running scripts is disabled"）。
+   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned      # 提示时输入 Y
    py -3.11 -m venv .venv
-   .venv\Scripts\activate
+   .venv\Scripts\Activate.ps1
    pip install torch --index-url https://download.pytorch.org/whl/cu126
    pip install -r splendor_ai\requirements-worker.txt
    python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
    ```
+
+   不想改执行策略也行：改用 `cmd`（不是 PowerShell）执行 `.venv\Scripts\activate.bat`，
+   后面的命令一样跑。第 5 步的 `run_worker.bat` 本来就是 `cmd` 批处理，不受执行策略影响。
+   激活成功的标志是提示符前面多了 `(.venv)`。
 
    **先装 CUDA 版 torch，再装其余依赖**（否则会装成 CPU 版）。最后一行打印 `True` 说明 3060 可用。
 3. 配置：
@@ -88,6 +105,12 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
 
 假设代码已经在 NSCC 的工作目录里（例如 `~/splendor`），以下都在**登录节点**执行；脚本里每一行都有英文注释。
 
+**先记下你的项目代码（project code）**：ASPIRE 2A 的每个作业都要记账到一个项目，`qsub` 不带 `-P` 会被直接拒绝。
+个人配额一般是 `personal-<nusnetid>`，以 NSCC 开通邮件为准（也可以 `qstat -Qf` / 问 helpdesk 确认）。
+下面所有 `qsub` 都写成 `-P <项目代码>`，请替换成你自己的；训练脚本会自己把这个代码传给续跑的下一段作业
+（所以训练作业要同时写 `-P <项目代码>` 和 `-v PROJECT=<项目代码>`：前者记账当前这段，后者传给下一段）。
+忘了传会在作业一开始就打印 `ERROR: no NSCC project code` 并退出，不会白排队一整天。
+
 1. 装环境（一次性，登录节点有外网）：
 
    ```bash
@@ -97,15 +120,42 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
 
    它会 `module load anaconda` → 建 conda 环境 `splendor`（Python 3.11）→ `pip install -r splendor_ai/requirements.txt`
    （Linux 上 PyPI 的 torch 自带 CUDA）→ 打印版本 → 做一次导入自检。登录节点上 `torch.cuda.is_available()` 为 False 是正常的。
-   建议再跑一遍单元测试：`conda activate splendor && python -m pytest splendor_ai/tests -q -x --ignore=splendor_ai/tests/test_worker_e2e.py`。
+
+   **新开的登录 shell 里 `conda activate` 用不了**（报 "Your shell has not been properly configured"）：
+   `module load anaconda` 只把 conda 放进 PATH，激活功能要先初始化一次。两种做法：
+
+   ```bash
+   # 做法 1（一次性，写进 ~/.bashrc，以后每次登录都可用）
+   module load anaconda
+   conda init bash
+   source ~/.bashrc                       # 或者重新登录一次
+   conda activate splendor
+
+   # 做法 2（不改 ~/.bashrc，每个 shell 里临时启用）
+   module load anaconda
+   eval "$(conda shell.bash hook)"
+   conda activate splendor
+   ```
+
+   PBS 脚本里不需要这一步：`nscc_train.pbs` / `nscc_eval.pbs` 自己 `source` 了
+   `$(conda info --base)/etc/profile.d/conda.sh`。
+
+   建议再跑一遍单元测试：
+   `conda activate splendor && python -m pytest splendor_ai/tests -q -x --ignore=splendor_ai/tests/test_worker_e2e.py`。
 
 2. 先做一次短的吞吐/连通性作业（也是 G4 门槛）：
 
    ```bash
-   qsub -v TRAIN_TIMEOUT=30m,MAX_CHAIN=0 splendor_ai/scripts/nscc_train.pbs
+   qsub -P <项目代码> -l walltime=00:30:00 \
+        -v PROJECT=<项目代码>,TRAIN_TIMEOUT=25m,MAX_CHAIN=0 \
+        splendor_ai/scripts/nscc_train.pbs
    qstat -u $USER            # 看排队/运行
    tail -f runs/nscc/logs/train.*.log
    ```
+
+   `-l walltime=00:30:00` 把这段短作业的墙钟压到 30 分钟（脚本里的 `#PBS -l walltime=23:59:00` 是给正式训练用的；
+   `#PBS` 指令在提交时就被 PBS 读走，读不到环境变量，所以只能在命令行上覆盖）。半小时的作业排队通常比一天的快得多。
+   `TRAIN_TIMEOUT=25m` 让训练器提前 5 分钟自己收尾存盘，`MAX_CHAIN=0` 表示跑完不续下一段。
 
    日志里每一代会打印 sims/s、moves/s、games/s、各模式的对局长度、stuck 率、loss，以及对固定基准（random / greedy / mcts）的胜率。
    目标：整节点 ≥ 40 万 sims/s，每张推理 GPU ≥ 25 万 evals/s；否则先按 `splendor_ai/README.md` 的 "Training" 一节调
@@ -114,7 +164,7 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
 3. 正式训练（自动续跑）：
 
    ```bash
-   qsub splendor_ai/scripts/nscc_train.pbs
+   qsub -P <项目代码> -v PROJECT=<项目代码> splendor_ai/scripts/nscc_train.pbs
    ```
 
    作业申请 `select=1:ngpus=4:ncpus=64:mem=440GB`，walltime 23:59；内部用 `timeout --signal=INT 23h` 让训练器干净地保存并退出，
@@ -129,9 +179,15 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
 4. 评估（单 GPU，随时可跑，不影响训练）：
 
    ```bash
-   qsub splendor_ai/scripts/nscc_eval.pbs                       # 评 runs/nscc/weights/latest.pt
-   qsub -v CKPT=runs/nscc/checkpoints/gen_0040.pt,GAMES=200 splendor_ai/scripts/nscc_eval.pbs
+   qsub -P <项目代码> splendor_ai/scripts/nscc_eval.pbs          # 评 runs/nscc/weights/latest.pt
+   qsub -P <项目代码> -v CKPT=runs/nscc/checkpoints/gen_0040.pt,GAMES=200 \
+        splendor_ai/scripts/nscc_eval.pbs
+   # 想先小跑一次看通不通（20 局、只跑 2 人模式、半小时墙钟）：
+   qsub -P <项目代码> -l walltime=00:30:00 -v GAMES=20,MODES=ind2 \
+        splendor_ai/scripts/nscc_eval.pbs
    ```
+
+   评估作业不会自己续跑，所以只要 `-P` 就够了（`-v PROJECT=` 可省）。
 
    产出 `reports/arena_<ckpt>_<job>.md`：对固定锚点（random=0 Elo、greedy、mcts40/160/640）的 Bradley–Terry Elo、95% 置信区间、
    各模式胜率、按座位拆分（1v2 会分 solo/duo）、卡死/截断比例。G5 门槛：2 人模式对 mcts 锚点 ≥ 85%，且 Elo 随代数单调上升。
@@ -148,8 +204,42 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
 
 6. 只想训练某一种模式（专精模型）：
 
+   **先看清配置是怎么决定模式比例的。** `nscc_4xa100.yaml` 里同时有 `selfplay.mode_mixture` 和
+   `selfplay.phases`，而**只要 `phases` 非空，`mode_mixture` 就完全不起作用**——训练器每次开局都用
+   `phase_for(已完成局数)` 选出当前阶段，再按该阶段自己的 `mixture` 抽模式（`selfplay/config.py::phase_for`）。
+   现有的课程表是：
+
+   | 阶段（`until_games`） | 模式比例 | 备注 |
+   |---|---|---|
+   | < 50 000 | `ind2: 1.0` | 热身，搜索也调小（`sims_full: 150`、`sims_fast: 40`） |
+   | < 300 000 | `ind2: 1.0` | 满搜索预算，仍然只打 2 人 |
+   | < 1 000 000 | ind2 0.40 / ind3 0.15 / ind4 0.15 / ovt 0.15 / team_adj 0.10 / team_opp 0.05 | 逐步过渡 |
+   | 之后（`until_games: null`） | ind2 0.25 / ind3 0.15 / ind4 0.15 / ovt 0.20 / team_adj 0.15 / team_opp 0.10 | 稳态 |
+
+   所以「只练 1v2」要改的是 `phases`，改 `mode_mixture` 没有任何效果。推荐做法是复制一份配置再改：
+
    ```bash
-   qsub -v CONFIG=splendor_ai/configs/nscc_4xa100.yaml,RUN_DIR=runs/ovt_only splendor_ai/scripts/nscc_train.pbs
+   cp splendor_ai/configs/nscc_4xa100.yaml splendor_ai/configs/nscc_ovt.yaml
+   # 编辑 nscc_ovt.yaml：把 phases 换成一句
+   #   phases:
+   #     - until_games: null
+   #       mixture: {ovt: 1.0}
+   # （想保留便宜的热身阶段，就把每个阶段的 mixture 都改成 {ovt: 1.0}）
+   qsub -P <项目代码> \
+        -v PROJECT=<项目代码>,CONFIG=splendor_ai/configs/nscc_ovt.yaml,RUN_DIR=runs/ovt_only \
+        splendor_ai/scripts/nscc_train.pbs
    ```
 
-   然后在 yaml 里把 `mode_mixture` 改成只含该模式（或用 `--set`），导出为 `ovt.pt` 放进 `models\`，worker 会优先加载按模式命名的文件。
+   等价的命令行写法（自己在交互节点上跑训练器时用；`qsub -v` 的值里不能带逗号，
+   而这段 YAML 里全是逗号，所以它不适合从 `-v` 传进去）：
+
+   ```bash
+   python -m splendor_ai.selfplay.train \
+       --config splendor_ai/configs/nscc_4xa100.yaml \
+       --set run_dir=runs/ovt_only \
+       --set 'selfplay.phases=[{until_games: null, mixture: {ovt: 1.0}}]'
+   ```
+
+   `--set` 的键必须是配置树里真实存在的字段，写错会立刻报错并退出（例如 `--set job_id=...` 会告诉你
+   `RunConfig has no field 'job_id'`）；先用 `--print-config` 确认解析结果再提交作业。
+   训练完导出为 `ovt.pt` 放进 `models\`，worker 会优先加载按模式命名的文件。

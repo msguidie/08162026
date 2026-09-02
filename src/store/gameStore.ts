@@ -90,9 +90,18 @@ const EMPTY_TEAM_SEATS: TeamSeats = [[null, null], [null, null]];
 
 const useGameStore = create<GameStore>((set, get) => {
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  // Fallback timer for enterLobby(), cleared as soon as the server answers so a
+  // stale timeout cannot yank the user out of whatever screen they moved on to.
+  let enterLobbyTimer: ReturnType<typeof setTimeout> | null = null;
   // Tokens so a slow replay response cannot overwrite a newer one.
   let replayListRequest = 0;
   let replayRequest = 0;
+
+  function clearEnterLobbyTimer() {
+    if (enterLobbyTimer === null) return;
+    clearTimeout(enterLobbyTimer);
+    enterLobbyTimer = null;
+  }
 
   function applyLobbyState(lobbyState?: LobbyState) {
     if (!lobbyState) return;
@@ -108,6 +117,7 @@ const useGameStore = create<GameStore>((set, get) => {
   }
 
   function handleLobbyResponse(result: LobbyResponse) {
+    clearEnterLobbyTimer();
     if (result?.action === 'rejoin_game') return;
     if (result?.action === 'lobby_full' || result?.action === 'error') {
       showToast(result.error || 'Unable to enter the lobby', 'warn');
@@ -348,14 +358,19 @@ const useGameStore = create<GameStore>((set, get) => {
       const { socket } = get();
       if (!socket) return;
       set({ connectionStatus: 'entering_lobby' });
-      socket.emit('enter_lobby', (result: LobbyResponse) => {
-        handleLobbyResponse(result);
-      });
-      setTimeout(() => {
-        if (get().connectionStatus === 'entering_lobby') {
+      clearEnterLobbyTimer();
+      enterLobbyTimer = setTimeout(() => {
+        enterLobbyTimer = null;
+        // Only rescue a user who is still sitting on the login screen waiting for
+        // the lobby — never drag them out of the replay browser or a game.
+        if (get().connectionStatus === 'entering_lobby' && get().appPhase === 'LOGIN') {
           set({ appPhase: 'WAITING_ROOM', connectionStatus: 'in_lobby' });
         }
       }, 3000);
+      // The ack clears the timer (handleLobbyResponse), so arm it first.
+      socket.emit('enter_lobby', (result: LobbyResponse) => {
+        handleLobbyResponse(result);
+      });
     },
 
     leaveLobby: () => {

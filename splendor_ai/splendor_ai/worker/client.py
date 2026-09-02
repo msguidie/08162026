@@ -147,6 +147,17 @@ class WorkerClient:
         @sio.event
         def connect() -> None:                             # noqa: D401
             self.log("info", f"connected to {self.cfg.server_url}")
+            # Cancellations belong to the connection that sent them.  Ids that
+            # were cancelled after their answer had already gone out are never
+            # claimed by a handler, and the server restarts its request counter
+            # (`ai-1`, `ai-2`, …) whenever IT restarts — so keeping them would
+            # both leak and, after a server restart, silently drop live
+            # requests that happen to reuse an id.
+            with self._lock:
+                stale = len(self._cancelled)
+                self._cancelled.clear()
+            if stale:
+                self.log("debug", f"dropped {stale} stale cancellation(s)")
             self._register()
 
         @sio.event

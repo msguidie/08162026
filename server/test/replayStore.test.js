@@ -270,11 +270,35 @@ async function run() {
   suite('replayStore — paths');
 
   await test('derives YYYY/MM paths in UTC', () => {
-    assertEqual(store.gameFilePath('replays', 'game-1', Date.UTC(2026, 0, 5)), 'replays/2026/01/game-1.json');
-    assertEqual(store.gameFilePath('games', 'game-2', Date.UTC(2026, 11, 31)), 'games/2026/12/game-2.json');
+    assertEqual(store.gameFilePath('replays', 'game-1-a', Date.UTC(2026, 0, 5)), 'replays/2026/01/game-1-a.json');
+    assertEqual(store.gameFilePath('games', 'game-2-b', Date.UTC(2026, 11, 31)), 'games/2026/12/game-2-b.json');
     assertEqual(store.indexFilePath('replays'), 'replays/index.json');
     assertEqual(store.timestampFromId('game-1725280000000-ab12'), 1725280000000);
     assertEqual(store.timestampFromId('nonsense'), null);
+  });
+
+  await test('only accepts ids of the form game-<ms>-<rand>', async () => {
+    store.reset();
+    const valid = 'game-1725280000000-ab12';
+    assertEqual(store.isValidReplayId(valid), true);
+    const invalid = [
+      '', null, undefined, 'nonsense', '../index', '..%2Findex', 'game-1725280000000-ab12/../index',
+      'game-x-ab12', 'game-1725280000000-AB12', 'game-1725280000000-toolongrandom1',
+      'game-1725280000000-ab 12', 'game-1725280000000-ab12.json', 'index.json',
+    ];
+    for (const id of invalid) assertEqual(store.isValidReplayId(id), false, `rejects ${JSON.stringify(id)}`);
+
+    // No GitHub call is ever made for an id that cannot be a room id.
+    const client = fakeGithub({ files: {} });
+    useGithub(client);
+    for (const id of invalid) {
+      assertEqual(await store.getReplay(id), null, `getReplay(${JSON.stringify(id)})`);
+      assertEqual(await store.getFrames(id), null, `getFrames(${JSON.stringify(id)})`);
+    }
+    assertEqual(client.calls, [], 'the GitHub client was never called');
+    await assertThrows(() => store.gameFilePath('replays', '../../secret', 0),
+      err => assert(/invalid replay id/.test(err.message), err.message),
+      'gameFilePath refuses a traversal id');
   });
 
   // Leave the process exactly as it was for the end-to-end suite.

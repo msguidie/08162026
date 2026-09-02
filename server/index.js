@@ -137,6 +137,12 @@ function isBotEntry(entry) {
   return entry?.isAI === true;
 }
 
+// Bot names are reserved: nobody may register or log in as one, otherwise a
+// human could take the seat the bridge drives (and inherit the bot's rating).
+function isBotUsername(username) {
+  return typeof username === 'string' && BOT_USERNAMES.includes(username.trim());
+}
+
 function humanLobbyCount() {
   return lobbyQueue.filter(player => !isBotEntry(player)).length;
 }
@@ -215,6 +221,7 @@ app.post('/api/accounts', (req, res) => {
   const { username } = req.body;
   if (!username || typeof username !== 'string' || !username.trim()) return res.status(400).json({ error: 'Username required' });
   const name = username.trim();
+  if (isBotUsername(name)) return res.status(409).json({ error: 'That username is reserved for AI players' });
   if (accounts.has(name)) return res.status(409).json({ error: 'Username already exists' });
   const account = { username: name, rating: 1000, gamesPlayed: 0, wins: 0, avatarSeed: nextAvatarSeed(), created: Date.now() };
   accounts.set(name, account);
@@ -234,6 +241,7 @@ app.get('/api/replays', async (req, res) => {
 app.get('/api/replays/status', (_req, res) => res.json(replayStore.status()));
 
 app.get('/api/replays/:id', async (req, res) => {
+  if (!replayStore.isValidReplayId(req.params.id)) { res.status(404).json({ error: 'Replay not found' }); return; }
   try {
     const data = await replayStore.getFrames(req.params.id);
     if (!data) { res.status(404).json({ error: 'Replay not found' }); return; }
@@ -249,6 +257,7 @@ app.get('/api/replays/:id', async (req, res) => {
 });
 
 app.get('/api/replays/:id/raw', async (req, res) => {
+  if (!replayStore.isValidReplayId(req.params.id)) { res.status(404).json({ error: 'Replay not found' }); return; }
   try {
     const json = await replayStore.getReplay(req.params.id);
     if (!json) { res.status(404).json({ error: 'Replay not found' }); return; }
@@ -590,6 +599,9 @@ aiBridge.init({
   getRoom: roomId => gameRooms.get(roomId) || null,
   applyGameAction,
   resignPlayer,
+  // `lobbyState().aiAvailable` is a snapshot: without this the "Add AI" button
+  // stays wrong for everyone already in the lobby until the next lobby event.
+  onAvailabilityChange: () => broadcastLobby(),
 });
 
 const TIMER_POLL_INTERVAL = 250;
@@ -611,7 +623,10 @@ io.on('connection', (socket) => {
   // browser clients and when AI_WORKER_SECRET is unset.
   aiBridge.attach(socket);
 
-  socket.on('login', ({ username }, cb) => {
+  socket.on('login', ({ username } = {}, cb) => {
+    // Bot accounts exist (they are rated like humans) but are driven by the
+    // AI bridge only — a browser may never sign in as one.
+    if (isBotUsername(username)) { cb?.({ error: 'Bot accounts cannot be used to log in' }); return; }
     const account = accounts.get(username);
     if (!account) { cb?.({ error: 'Account not found' }); return; }
     currentUsername = username;

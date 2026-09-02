@@ -480,11 +480,28 @@ costs: `random`/`greedy` ≈ 5 ms/game, `mcts40` ≈ 0.7 s, `mcts160` ≈ 3 s,
 | `random` |   0 |   0 …    0 |   102 | 16.2% |
 ```
 
-Read the *ordering* first, then the gaps. In this excerpt (a 135-game smoke
-run) `mcts40` sits **below** `greedy` — 40 simulations of a rollout-value
-search really is worse than the 1-ply heuristic. The ladder is monotone in
-`sims`, not against `greedy`: a 2p spot check measured `mcts640` +580,
-`mcts160` +110, `greedy` 0, `mcts40` −113 Elo.
+Read the *ordering* first, then the gaps — and the excerpt above (a real
+135-game smoke run, kept here as the cautionary example) is **wrong**:
+`mcts40` sits *below* `greedy`, i.e. a rung of the ladder is weaker than the
+rung under it, and every Elo fitted through it is meaningless.
+
+The cause was the leaf prior, not the budget. With **uniform** priors a
+40-simulation PUCT search spends its whole budget on the ~40-way take block
+and never expands a buy, so `mcts40` scored **0.13** against `greedy` over 20
+paired ind2 games. The anchors now use a buy-biased leaf prior
+(`heuristic_priors`) on top of the same greedy rollouts, which puts the same
+rung at **0.71** against `greedy`; the current measured ordering over 20
+paired ind2 games per pairing is
+
+```
+20 paired ind2 games per pairing — win rate of the stronger rung
+  greedy  0.98 vs random     mcts40  0.71 vs greedy
+  mcts160 0.90 vs greedy     mcts160 0.78 vs mcts40
+  mcts640 0.65 vs mcts160    mcts640 1.00 vs random
+```
+
+If you ever see a rung out of order in your own report, that is a bug in the
+ladder, not a curiosity — fix it before quoting any number from that run.
 
 * **One joint fit, not a chain.** Every game constrains every rating through a
   single Bradley–Terry likelihood (Zermelo/MM iteration), so a bot that never
@@ -517,17 +534,29 @@ search really is worse than the 1-ply heuristic. The ladder is monotone in
 | anchor | what it is | why it is in the ladder |
 | --- | --- | --- |
 | `random` | uniform over the legal actions | the absolute zero of the scale; pinned at 0 Elo forever |
-| `greedy` | the 1-ply heuristic of `search/evaluators.py::greedy_action` | the "sane beginner" line — gate **G2** requires ≥95% for it against `random` in every mode |
-| `mcts40` | NN-free PUCT, 40 sims, greedy rollouts | a search that is *deliberately too small* — the bottom of the search curve |
+| `greedy` | the 1-ply heuristic of `search/evaluators.py::greedy_action` | the "sane beginner" line — gate **G2** requires ≥95% for it against `random` in every mode, and no MCTS rung may sit below it |
+| `mcts40` | NN-free PUCT, 40 sims, heuristic priors + greedy rollouts | the bottom of the search curve: the smallest budget that is still stronger than `greedy` |
 | `mcts160` | the same at 160 sims | the working reference: gates G5/G6 are quoted against a mid-ladder MCTS anchor |
 | `mcts640` | the same at 640 sims | the top rung; a strong net must beat it decisively before deployment |
 
-The three MCTS rungs share one frozen `SearchConfig` and differ **only** in
-`sims` (no Dirichlet noise, no forced playouts, argmax move selection), so they
-form an absolute, monotone strength curve. **Never retune them** — a changed
+The three MCTS rungs share one frozen `SearchConfig` *and* one evaluator —
+`RolloutEvaluator("greedy", max_plies=60, priors="heuristic")`: greedy rollouts
+for the value, `heuristic_priors` (buy block weighted up, reserve block down)
+for the prior — and differ **only** in `sims`, so they form an absolute,
+monotone strength curve. The prior is part of the anchor, not a tuning knob:
+uniform priors leave a 40-simulation search unable to reach its own buys, which
+is what put `mcts40` below `greedy` before. **Never retune them** — a changed
 anchor silently invalidates every historical Elo number, which is exactly how
 the projects surveyed in `docs/research/judges.md` ended up unable to say
 whether they had improved.
+
+Re-measure the ladder after any change to `search/` with a small paired run
+(20 pairs of 2p games is enough to catch an inversion):
+
+```bash
+python -m splendor_ai.arena --bots random greedy mcts40 mcts160 mcts640 \
+    --modes ind2 --games 40 --workers 4 --out reports/anchors_ind2.md
+```
 
 ### Gates (`docs/AI_DESIGN.md` §2), and which command checks them
 

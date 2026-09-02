@@ -396,6 +396,55 @@ def from_dict(data: Dict[str, Any]) -> RunConfig:
     return _coerce(cfg)
 
 
+#: Nested sections of :class:`RunConfig`.  The tree cannot be walked through
+#: ``dataclasses.fields(...).type`` because ``from __future__ import
+#: annotations`` turns every annotation into a string, so the map is explicit
+#: (``_coerce`` builds the same set).
+_SECTIONS: Dict[str, type] = {
+    "net": NetConfig,
+    "search_full": SearchConfig,
+    "search_fast": SearchConfig,
+    "selfplay": SelfPlayConfig,
+    "replay": ReplayConfig,
+    "learner": LearnerConfig,
+    "inference": InferenceConfig,
+    "eval": EvalConfig,
+}
+
+
+def _check_override_key(key: str, item: str) -> None:
+    """Refuse a ``--set`` path RunConfig does not have.
+
+    ``--set`` writes into a plain dict, so an unknown *top-level* key would
+    otherwise only fail later inside :func:`from_dict` with no mention of the
+    flag that introduced it (and a free-form section such as
+    ``selfplay.mode_mixture.ind2`` must still be allowed to invent keys).
+    Only the first two levels are schema-checked; below them anything goes.
+    """
+    parts = [part for part in key.split(".") if part]
+    if not parts:
+        raise ValueError(f"--set expects key=value, got {item!r}")
+    known = {f.name for f in fields(RunConfig)}
+    if parts[0] not in known:
+        raise ValueError(
+            f"--set {item!r}: RunConfig has no field {parts[0]!r}; "
+            f"known keys are {sorted(known)}")
+    section = _SECTIONS.get(parts[0])
+    if section is None:
+        if len(parts) > 1:
+            raise ValueError(
+                f"--set {item!r}: {parts[0]!r} is a single value, not a "
+                f"section — it has no {'.'.join(parts[1:])!r} below it")
+        return
+    if len(parts) < 2:
+        return
+    sub = {f.name for f in fields(section)}
+    if parts[1] not in sub:
+        raise ValueError(
+            f"--set {item!r}: {section.__name__} ({parts[0]}) has no field "
+            f"{parts[1]!r}; known keys are {sorted(sub)}")
+
+
 def _parse_value(text: str) -> Any:
     try:
         return yaml.safe_load(text)
@@ -410,6 +459,7 @@ def apply_overrides(data: Dict[str, Any], overrides) -> Dict[str, Any]:
         if "=" not in item:
             raise ValueError(f"--set expects key=value, got {item!r}")
         key, _, raw = item.partition("=")
+        _check_override_key(key.strip(), item)
         node = data
         parts = key.strip().split(".")
         for part in parts[:-1]:

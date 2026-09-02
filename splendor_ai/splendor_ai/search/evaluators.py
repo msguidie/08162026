@@ -35,7 +35,7 @@ from .mcts import seat_relative, standings_values, terminal_values
 __all__ = [
     "Evaluator", "UniformEvaluator", "RolloutEvaluator", "GreedyValueEvaluator",
     "ZeroEncoder", "state_encoder", "LeafRef", "greedy_action", "rollout_values",
-    "UniformRolloutEvaluator",
+    "UniformRolloutEvaluator", "heuristic_priors", "BUY_BIAS", "RESERVE_BIAS",
 ]
 
 _COST_SUM: Tuple[int, ...] = tuple(sum(c) for c in CARD_COST)
@@ -234,6 +234,32 @@ def rollout_values(state: E.GameState, policy: str = "greedy",
 
 # ── evaluators ────────────────────────────────────────────────────────────
 
+#: Default prior weights of the buy / reserve action blocks relative to a take
+#: (:func:`heuristic_priors`).  A legal buy is by definition an *affordable*
+#: one, so this is "look at the cards you can actually buy first".
+BUY_BIAS = 3.0
+RESERVE_BIAS = 0.5
+
+
+def heuristic_priors(mask: np.ndarray, buy_bias: float = BUY_BIAS,
+                     reserve_bias: float = RESERVE_BIAS) -> np.ndarray:
+    """Buy-biased priors over one legal-action mask (``float32[NUM_ACTIONS]``).
+
+    Uniform priors are hopeless at a small simulation budget: with ~40 legal
+    takes and a handful of buys, a 40-simulation PUCT search spends its whole
+    budget on the take block and never expands the move that wins the game
+    (measured: uniform ``mcts40`` scored 0.13 against ``greedy``).  Weighting
+    the buy block up is the cheapest fix that keeps the anchors NN-free.
+    """
+    w = np.asarray(mask, dtype=np.float32).copy()
+    w[BUY_BOARD_START:CHOOSE_TILE_START] *= float(buy_bias)
+    w[RESERVE_BOARD_START:BUY_BOARD_START] *= float(reserve_bias)
+    total = w.sum()
+    if total <= 0:
+        return _uniform_priors(mask)[0]
+    return w / total
+
+
 class UniformEvaluator:
     """Uniform priors over the legal actions, zero values.  The cheapest one."""
 
@@ -255,24 +281,41 @@ class RolloutEvaluator:
     reproducible from the tree's seed alone.  ``policy='random'`` consumes
     ``rng`` in batch order, so give each tree its own evaluator if you need
     per-tree reproducibility under the :class:`~.scheduler.Scheduler`.
+
+    ``priors='heuristic'`` replaces the uniform prior with
+    :func:`heuristic_priors`.  The value side is untouched, so the search is
+    still NN-free and still deterministic under ``policy='greedy'`` — but the
+    small-budget rungs of the anchor ladder now actually look at their buys
+    (``docs/AI_DESIGN.md`` §1.7).
     """
 
     def __init__(self, policy: str = "greedy", max_plies: int = 60,
-                 rng: Optional[np.random.Generator] = None):
+                 rng: Optional[np.random.Generator] = None,
+                 priors: str = "uniform"):
         if policy not in ("greedy", "random"):
             raise ValueError("policy must be 'greedy' or 'random'")
+        if priors not in ("uniform", "heuristic"):
+            raise ValueError("priors must be 'uniform' or 'heuristic'")
         self.policy = policy
         self.max_plies = int(max_plies)
         self.rng = rng if rng is not None else np.random.default_rng(0)
-        self.name = f"rollout:{policy}"
+        self.priors = priors
+        self.name = f"rollout:{policy}" + (
+            "" if priors == "uniform" else f"+{priors}")
 
     def evaluate(self, obs: Any, mask: np.ndarray
                  ) -> Tuple[np.ndarray, np.ndarray]:
-        priors = _uniform_priors(mask)
+        m = np.asarray(mask, dtype=np.bool_)
+        if m.ndim == 1:
+            m = m[None]
+        priors = _uniform_priors(m)
         n = priors.shape[0]
         values = np.zeros((n, 4), dtype=np.float32)
+        heuristic = self.priors == "heuristic"
         for i in range(n):
             state, seat = obs[i]
+            if heuristic:
+                priors[i] = heuristic_priors(m[i])
             z = rollout_values(state, self.policy, self.max_plies, self.rng)
             values[i] = seat_relative(z, seat, state.num_players)
         return priors, values
@@ -290,8 +333,8 @@ class GreedyValueEvaluator:
     name = "greedy-value"
 
     def __init__(self, card_weight: float = 0.45, gem_weight: float = 0.05,
-                 scale: float = 4.0, buy_bias: float = 3.0,
-                 reserve_bias: float = 0.5):
+                 scale: float = 4.0, buy_bias: float = BUY_BIAS,
+                 reserve_bias: float = RESERVE_BIAS):
         self.card_weight = card_weight
         self.gem_weight = gem_weight
         self.scale = scale
@@ -335,13 +378,7 @@ class GreedyValueEvaluator:
 
     # -- prior ---------------------------------------------------------
     def _prior(self, mask: np.ndarray) -> np.ndarray:
-        w = np.asarray(mask, dtype=np.float32).copy()
-        w[BUY_BOARD_START:CHOOSE_TILE_START] *= self.buy_bias
-        w[RESERVE_BOARD_START:BUY_BOARD_START] *= self.reserve_bias
-        s = w.sum()
-        if s <= 0:
-            return _uniform_priors(mask)[0]
-        return w / s
+        return heuristic_priors(mask, self.buy_bias, self.reserve_bias)
 
     def evaluate(self, obs: Any, mask: np.ndarray
                  ) -> Tuple[np.ndarray, np.ndarray]:
@@ -361,5 +398,6 @@ class GreedyValueEvaluator:
 
 #: ``docs/AI_DESIGN.md`` §1.6 calls the NN-free anchor evaluator
 #: ``UniformRolloutEvaluator`` (uniform prior + rollout value).  That is
-#: exactly :class:`RolloutEvaluator`; the alias keeps both names valid.
+#: exactly :class:`RolloutEvaluator` with its default ``priors='uniform'``;
+#: the alias keeps both names valid.
 UniformRolloutEvaluator = RolloutEvaluator

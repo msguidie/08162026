@@ -79,7 +79,17 @@ function two(value) {
   return String(value).padStart(2, '0');
 }
 
+// A replay id is a room id minted by `startGame()`: `game-<startMs>-<rand>`.
+// Everything reachable from the REST layer is checked against this shape, so
+// no caller can steer a cache key or a GitHub path (`..%2F`, `../`, `?ref=`).
+const REPLAY_ID_RE = /^game-\d+-[a-z0-9]{1,12}$/;
+
+function isValidReplayId(id) {
+  return typeof id === 'string' && REPLAY_ID_RE.test(id);
+}
+
 function gameFilePath(dir, id, timestamp) {
+  if (!isValidReplayId(id)) throw new Error(`invalid replay id: ${JSON.stringify(id)}`);
   const date = new Date(Number(timestamp) || 0);
   return `${dir}/${date.getUTCFullYear()}/${two(date.getUTCMonth() + 1)}/${id}.json`;
 }
@@ -240,7 +250,7 @@ async function listGames(options = {}) {
 }
 
 async function getReplay(id) {
-  if (!id) return null;
+  if (!isValidReplayId(id)) return null;
   const local = memoryReplays.get(id);
   if (local) return local;
 
@@ -267,6 +277,7 @@ async function getReplay(id) {
 // Reconstructs through replayEngine; throws ReplayCorruptError for a
 // replay the rules engine rejects (the REST layer answers 422).
 async function getFrames(id) {
+  if (!isValidReplayId(id)) return null;
   const cached = lruGet(framesCache, id);
   if (cached) return cached;
 
@@ -310,6 +321,7 @@ module.exports = {
   gameFilePath,
   indexFilePath,
   timestampFromId,
+  isValidReplayId,
   MEMORY_LIMIT,
   FRAMES_CACHE_LIMIT,
 };

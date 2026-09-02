@@ -34,6 +34,9 @@ const deps = {
   getRoom: () => null,
   applyGameAction: () => ({ error: 'AI bridge is not wired up' }),
   resignPlayer: () => ({ error: 'AI bridge is not wired up' }),
+  // Called whenever `isAvailable()` flips, so the server can re-broadcast the
+  // lobby (`aiAvailable`) instead of leaving members with a stale value.
+  onAvailabilityChange: () => {},
 };
 
 let worker = null;                     // { socket, name, version, modes }
@@ -140,12 +143,14 @@ function onRegister(socket, data, ack) {
   if (previous && previous.socket !== socket) log(`worker ${previous.name} replaced by ${worker.name}`);
   log(`worker registered: ${worker.name}${worker.version ? ` v${worker.version}` : ''} [${worker.modes.join(', ')}]`);
   ack?.({ ok: true });
+  if (!previous) safe(() => deps.onAvailabilityChange(true), 'onAvailabilityChange');
 }
 
 function onSocketDisconnect(socket) {
   if (!worker || worker.socket !== socket) return;
   log(`worker ${worker.name} disconnected — bot seats continue on the fallback policy`);
   worker = null;
+  safe(() => deps.onAvailabilityChange(false), 'onAvailabilityChange');
   // Anything already asked for is answered by the fallback right away.
   for (const entry of [...inFlight.values()]) {
     if (entry.sent && !entry.applying) {
@@ -274,7 +279,21 @@ function isStale(entry) {
   const state = room.gameState;
   return state.phase !== 'PLAYING'
     || state.turnNumber !== entry.turnNumber
-    || state.currentPlayerIndex !== entry.playerIndex;
+    || state.currentPlayerIndex !== entry.playerIndex
+    || state.resignedPlayers?.includes(entry.playerIndex) === true;
+}
+
+/**
+ * A pending noble choice is only *actionable* while the turn's action is the
+ * BUY that produced it: `processAction` refuses CHOOSE_TILE otherwise
+ * (docs/KNOWN_ISSUES.md §1 — a gem take or a reserve can leave the flag set
+ * with `turnAction` back to null). In that orphaned state the seat has to play
+ * an ordinary move, so the bridge must ask for one.
+ */
+function tileChoiceActionable(state) {
+  return Array.isArray(state?._pendingTileChoice)
+    && state._pendingTileChoice.length > 0
+    && state.turnAction?.type === 'BUY';
 }
 
 function isBotSeat(room, playerIndex) {
@@ -291,17 +310,30 @@ function maybeAct(room) {
     if (!room?.id || !room.gameState) return;
     const state = room.gameState;
     if (state.phase !== 'PLAYING') { clearRoom(room.id); return; }
+
+    // One request per room. A request whose position moved on (the seat
+    // resigned, a timeout eliminated it, the turn advanced) is abandoned here:
+    // the worker is told to stop and its late answer is refused, so the seat
+    // that is really to move can be asked right away.
+    const pending = inFlight.get(room.id);
+    if (pending) {
+      if (pending.applying) return; // re-entrant call from inside runSequence
+      if (!isStale(pending)) return;
+      warn(`superseding request ${pending.requestId} for ${room.id} seat ${pending.playerIndex}: the position moved on`);
+      cancelWithWorker(pending);
+      release(pending);
+    }
+
     const playerIndex = state.currentPlayerIndex;
     if (!isBotSeat(room, playerIndex)) return;
     if (state.resignedPlayers?.includes(playerIndex)) return;
-    if (inFlight.has(room.id)) return; // re-entrancy guard: one request per room
 
     const entry = {
       requestId: `ai-${++requestCounter}`,
       roomId: room.id,
       playerIndex,
       turnNumber: state.turnNumber,
-      kind: Array.isArray(state._pendingTileChoice) && state._pendingTileChoice.length > 0 ? 'TILE' : 'MOVE',
+      kind: tileChoiceActionable(state) ? 'TILE' : 'MOVE',
       sent: false,
       applying: false,
       timer: null,
@@ -411,7 +443,12 @@ function runSequence(room, entry, translated, source) {
   // the maybeAct() below asks the worker for it (kind 'TILE'). That is progress,
   // not a stall — treating it as one would hand every noble choice to the
   // fallback and make TILE requests unreachable.
-  const awaitingTileChoice = !!after?.gameState?._pendingTileChoice?.length;
+  // An orphaned choice (`_pendingTileChoice` set with `turnAction` no longer
+  // BUY, docs/KNOWN_ISSUES.md §1) also counts: the seat legitimately keeps the
+  // turn and plays on, so a completed move must not be read as a stall — the
+  // maybeAct() below simply asks for another MOVE. `failure` still breaks the
+  // tie, so a sequence the engine refused can never loop on the flag.
+  const awaitingTileChoice = !failure && !!after?.gameState?._pendingTileChoice?.length;
   const stalled = !!after?.gameState
     && after.gameState.phase === 'PLAYING'
     && after.gameState.phase === phaseBefore

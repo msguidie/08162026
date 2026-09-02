@@ -678,12 +678,17 @@ class MCTS:
         """Improved policy ``softmax(logits + sigma(completedQ))`` and action.
 
         mctx returns ``argmax(g + logits + sigma(q))`` — the Gumbel sample —
-        which is an *exploration* choice: after sequential halving two
-        candidates usually survive and the Gumbel noise picks between them.
-        For play we return the noise-free improved-policy argmax over the
-        surviving candidates instead; :meth:`result` still samples the improved
-        policy itself during the temperature plies, which is where the
-        exploration belongs.
+        which is an *exploration* choice: the noise decides both which actions
+        sequential halving keeps looking at and which of the survivors is
+        played.  For play we return the noise-free improved-policy argmax
+        instead, i.e. ``argmax(policy_target)``: the same quantity this method
+        hands back as the training target, with the Gumbel draw left out of the
+        final pick entirely.  Restricting that argmax to the halving survivors
+        (which the earlier version did) put the noise straight back in through
+        the candidate set — measured over 40 openings, the action returned
+        disagreed with ``argmax(policy_target)`` 29 times, sometimes at a tenth
+        of its weight.  :meth:`result` still *samples* the improved policy
+        during the temperature plies, which is where exploration belongs.
         """
         target = np.zeros(NUM_ACTIONS, dtype=np.float32)
         legal = self.root_legal
@@ -704,9 +709,9 @@ class MCTS:
         s -= s.max()
         e = np.exp(s)
         target[legal] = (e / e.sum()).astype(np.float32)
-        improved = dict(zip(legal, scores))
-        best = max(self._g_cands, key=lambda a: improved[a])
-        return target, int(best)
+        improved = np.full(NUM_ACTIONS, -np.inf, dtype=np.float64)
+        improved[legal] = s                       # pre-softmax: no float ties
+        return target, int(np.argmax(improved))
 
     # -- result ----------------------------------------------------------
     def _policy_target(self) -> np.ndarray:
