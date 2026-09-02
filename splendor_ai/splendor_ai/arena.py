@@ -49,6 +49,7 @@ import math
 import os
 import sys
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import (Any, Dict, Iterable, List, Mapping, Optional, Sequence,
                     Tuple)
@@ -63,7 +64,8 @@ __all__ = [
     "ModeSpec", "MODES", "DEFAULT_MODES", "parse_mode", "parse_modes",
     "seat_arrangements", "pair_compositions", "build_schedule",
     "run_matches", "ArenaResults", "fit_bradley_terry", "Ratings",
-    "build_report", "render_markdown", "write_reports", "main",
+    "resolve_anchor", "build_report", "render_markdown", "write_reports",
+    "main",
 ]
 
 #: Elo points per natural log unit of Bradley–Terry strength.
@@ -433,10 +435,27 @@ def _normalise_bots(bots: Mapping[str, Any], device: str
     return out
 
 
+def _describe_factory(factory: Any) -> str:
+    """How a bot is named in the report's config block.
+
+    A spec string when there is one (so the run is reproducible from the
+    report alone), otherwise a stable class name — never ``repr`` of a
+    lambda, whose memory address would make two identical runs differ.
+    """
+    spec = getattr(factory, "spec", None)
+    if isinstance(spec, str) and spec:
+        return spec
+    name = getattr(factory, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return type(factory).__name__
+
+
 def run_matches(bots: Mapping[str, Any], modes: Sequence[Any],
                 games_per_pairing: int = 100, seed: int = 0, workers: int = 1,
                 max_plies: int = MAX_PLIES, mixed: bool = True,
                 max_mixed_tables: int = 4, progress: Any = None,
+                device: str = "cpu",
                 mp_context: str = "spawn") -> "ArenaResults":
     """Play the whole schedule and return the raw results.
 
@@ -444,16 +463,18 @@ def run_matches(bots: Mapping[str, Any], modes: Sequence[Any],
     built inside the worker that will use it, because a torch module is
     expensive to pickle and a CUDA one cannot be pickled at all.  A spec
     string (``'mcts160'``, ``'search:runs/x/weights/latest.pt:400'``) is
-    accepted as shorthand and turned into ``anchors.make_factory``; a ready
-    bot object works too when ``workers == 1``.
+    accepted as shorthand and turned into ``anchors.make_factory`` on
+    ``device``; a ready bot object works too when ``workers == 1``.
 
     ``workers > 1`` uses a ``multiprocessing`` pool whose children have their
     BLAS/OMP thread counts pinned to 1.  Results are reassembled in schedule
     order, so the report is bit-identical whatever the worker count.
     """
-    factories = _normalise_bots(dict(bots), device="cpu")
+    factories = _normalise_bots(dict(bots), device=device)
     names = list(factories)
-    mode_specs = parse_modes(modes)
+    # Deduped by key: a mode listed twice would schedule the same games with
+    # the same deals twice and quietly double-count them in the fit.
+    mode_specs = list({m.key: m for m in parse_modes(modes)}.values())
     jobs, tables = build_schedule(names, mode_specs, games_per_pairing, seed,
                                   mixed, max_mixed_tables)
     mode_payload = {m.key: m.to_dict() for m in mode_specs}
@@ -498,8 +519,7 @@ def run_matches(bots: Mapping[str, Any], modes: Sequence[Any],
     if len(games) != len(jobs):                            # pragma: no cover
         raise RuntimeError(f"{len(jobs) - len(games)} games did not come back")
     config = {
-        "bots": {name: getattr(f, "spec", getattr(f, "name", str(f)))
-                 for name, f in factories.items()},
+        "bots": {name: _describe_factory(f) for name, f in factories.items()},
         "modes": [m.to_dict() for m in mode_specs],
         "games_per_pairing": int(games_per_pairing),
         "seed": int(seed), "workers": int(workers),
@@ -1021,12 +1041,31 @@ def bootstrap_ci(values_by_unit: Mapping[Any, Sequence[float]],
 
 # ── report ────────────────────────────────────────────────────────────────
 
+def resolve_anchor(names: Sequence[str], anchor: str) -> str:
+    """The rating anchor actually used.
+
+    Bradley–Terry has one degree of freedom, so exactly one player is pinned.
+    If the requested anchor did not play in this arena the first bot is pinned
+    instead — loudly, because a table headed "anchor `random` = 0" that was in
+    fact centred on something else is precisely the kind of quietly
+    incomparable number this whole module exists to prevent.
+    """
+    if anchor in names:
+        return anchor
+    fallback = names[0]
+    warnings.warn(
+        f"rating anchor {anchor!r} did not play in this arena "
+        f"({list(names)}) — pinning {fallback!r} instead; ratings are not "
+        f"comparable with runs anchored on {anchor!r}",
+        RuntimeWarning, stacklevel=2)
+    return fallback
+
+
 def build_report(results: ArenaResults, anchor: str = "random",
                  anchor_rating: float = 0.0, bootstrap: int = 500,
                  seed: int = 0, per_mode: bool = True) -> Dict[str, Any]:
     """Fit the ratings and assemble the JSON payload the report renders."""
-    if anchor not in results.bots:
-        anchor = results.bots[0]
+    anchor = resolve_anchor(results.bots, anchor)
     overall = fit_bradley_terry(results, anchor=anchor,
                                 anchor_rating=anchor_rating,
                                 bootstrap=bootstrap, seed=seed)
@@ -1291,7 +1330,9 @@ bot specs: random | greedy | mcts<N> | net:<ckpt>[:c5] |
     parser.add_argument("--workers", type=int, default=1,
                         help="worker processes (1 = in-process)")
     parser.add_argument("--device", default="cpu",
-                        help="torch device for net/search bots")
+                        help="torch device for net/search bots; with --workers "
+                             "each process opens its own CUDA context "
+                             "(~300 MB), so keep it at or below 16 on one GPU")
     parser.add_argument("--max-plies", type=int, default=MAX_PLIES,
                         help="truncation cap per game")
     parser.add_argument("--anchor", default="random",
@@ -1342,10 +1383,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                           progress=None if args.quiet else progress)
     if not args.quiet:
         print("", file=sys.stderr)
-    md, js = write_reports(results, args.out, args.json, anchor=args.anchor,
+    # Resolve the anchor once so the report and this summary agree.
+    anchor = resolve_anchor(results.bots, args.anchor)
+    md, js = write_reports(results, args.out, args.json, anchor=anchor,
                            bootstrap=args.bootstrap, seed=args.seed,
                            include_games=not args.no_games)
-    ratings = fit_bradley_terry(results, anchor=args.anchor,
+    ratings = fit_bradley_terry(results, anchor=anchor,
                                 anchor_rating=args.anchor_rating)
     if not args.quiet:
         print(f"{len(results.games)} games in "

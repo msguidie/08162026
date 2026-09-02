@@ -25,7 +25,7 @@ import pytest
 from splendor_ai import anchors as A
 from splendor_ai import arena
 from splendor_ai.arena import (
-    ELO_SCALE, MODES, ArenaResults, ModeSpec, build_schedule, build_tables,
+    ELO_SCALE, MODES, ArenaResults, build_schedule, build_tables,
     fit_bradley_terry, game_values, pair_compositions, pairwise_from_game,
     parse_mode, render_markdown, run_matches, seat_arrangements, seat_credit,
     table_credit, write_reports,

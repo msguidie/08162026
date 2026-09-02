@@ -48,6 +48,11 @@ function log(message) {
   console.log(`[ai] ${message}`);
 }
 
+/** Opt-in trace of applied worker moves: AI_DEBUG=1. Silent by default. */
+function debug(message) {
+  if (process.env.AI_DEBUG === '1') console.log(`[ai] ${message}`);
+}
+
 function warn(message) {
   console.error(`[ai] ${message}`);
 }
@@ -421,6 +426,13 @@ function runSequence(room, entry, translated, source) {
     entry.applying = false;
     warn(`fallback could not finish the turn for ${entry.roomId} seat ${entry.playerIndex} — resigning`);
     safe(() => deps.resignPlayer(after, entry.playerIndex), 'resign');
+  }
+
+  if (source === 'worker' && !failure && !stalled) {
+    const kind = translated.resign
+      ? 'RESIGN'
+      : translated.actions.map(a => a.type).join('+');
+    debug(`applied ${kind} from worker for ${entry.roomId} seat ${entry.playerIndex}`);
   }
 
   entry.applying = false;

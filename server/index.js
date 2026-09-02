@@ -405,6 +405,9 @@ function startGame() {
   gameRooms.set(roomId, room);
   replaySafe(() => replayRecorder.begin(room));
 
+  // Seats played by bots, so every client can mark them in-game.
+  const aiSeats = playerInfos.reduce((seats, p, i) => (p.isAI ? [...seats, i] : seats), []);
+
   // Notify each player
   playerInfos.forEach((p, idx) => {
     const s = io.sockets.sockets.get(p.socketId);
@@ -413,6 +416,7 @@ function startGame() {
       roomId,
       playerIndex: idx,
       gameState: clientViewForPlayer(gameState, idx),
+      aiSeats,
     });
   });
 
@@ -644,6 +648,7 @@ io.on('connection', (socket) => {
         roomId,
         playerIndex: playerSocket.playerIndex,
         gameState: clientViewForPlayer(room.gameState, playerSocket.playerIndex),
+        aiSeats: room.playerSockets.reduce((seats, ps, i) => (ps.isAI ? [...seats, i] : seats), []),
         isReconnect: true,
       });
       if (room.gameState.currentPlayerIndex === playerSocket.playerIndex && room.gameState._pendingTileChoice) {

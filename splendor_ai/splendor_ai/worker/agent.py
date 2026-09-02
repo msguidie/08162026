@@ -258,17 +258,27 @@ class MoveAgent:
         return handle
 
     def warmup(self) -> None:
-        """Load ``shared.pt`` and run one forward pass so the first real move
-        does not pay the import + CUDA context cost."""
+        """Pay the cold-start cost up front, not on somebody's first move.
+
+        Loading torch, importing the search, building the CUDA context and
+        JIT-warming the first forward pass together cost a second or two; the
+        first real request would otherwise blow through its soft budget.
+        """
+        started = time.monotonic()
         handle = self.model_for("ind2")
         if handle is None:
             return
         try:
             state = E.new_game(2, rng=random.Random(0))
-            obs = handle.encode_fn(state, 0)
-            mask = np.asarray(E.legal_mask(state), dtype=bool)
-            handle.evaluator.evaluate(obs[None], mask[None])
-            self.log("info", "model warm-up done")
+            for _ in range(6):
+                E.apply(state, E.legal_actions(state)[0])
+            decision = Decision(action=_NONE_ACTION, level="warmup", seat=0)
+            soft = time.monotonic() + 2.0
+            self._search(state, state.current_player, handle, soft, soft + 1.0,
+                         decision)
+            self.log("info", f"warm-up done in "
+                             f"{(time.monotonic() - started) * 1000:.0f} ms "
+                             f"({decision.sims} simulations)")
         except Exception as err:                          # pragma: no cover
             self.log("warn", f"model warm-up failed: {err}")
 
@@ -410,7 +420,10 @@ class MoveAgent:
                     break
             result = tree.result()
             decision.sims = int(result.stats.get("sims_run", tree.sims_done))
-            decision.root_value = [float(v) for v in result.root_value]
+            # Entries >= num_players are padding the value head never learns
+            # (the loss masks them); zero them so the log means something.
+            decision.root_value = [float(v) if i < state.num_players else 0.0
+                                   for i, v in enumerate(result.root_value)]
             visits = np.asarray(result.visits, dtype=np.int64)
             order = [int(a) for a in np.argsort(-visits) if visits[a] > 0]
             best = int(result.action)
@@ -436,9 +449,9 @@ class MoveAgent:
             priors, values = evaluator.evaluate(obs[None], mask[None])
             p = np.asarray(priors[0], dtype=np.float64)
             if decision.root_value is None:
-                decision.root_value = [float(v) for v in
-                                       _absolute(values[0], seat,
-                                                 state.num_players)]
+                absolute = _absolute(values[0], seat, state.num_players)
+                decision.root_value = [float(v) if i < state.num_players else 0.0
+                                       for i, v in enumerate(absolute)]
             order = [int(a) for a in np.argsort(-p) if mask[a]]
             if order:
                 decision.policy = float(p[order[0]])

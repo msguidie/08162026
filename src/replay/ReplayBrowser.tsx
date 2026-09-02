@@ -99,7 +99,14 @@ function ReplayRow({ game, onOpen }: { game: ReplayIndexEntry; onOpen: () => voi
               {initials(name)}
             </span>
             <span className="truncate">{winners.has(seat) && '★ '}{name}</span>
-            {game.ai?.[seat] && <span className="text-[8px] text-slate-400 font-display flex-shrink-0">AI</span>}
+            {game.ai?.[seat] && (
+              <span
+                title="AI player"
+                className="text-[9px] px-1 rounded bg-[#7B6FA0]/10 text-[#7B6FA0] font-display font-bold flex-shrink-0"
+              >
+                AI
+              </span>
+            )}
           </span>
         ))}
       </div>

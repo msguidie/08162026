@@ -2,6 +2,7 @@ import React from 'react';
 import { Bot } from 'lucide-react';
 import useGameStore from '../store/gameStore';
 import Avatar from './Avatar';
+import BotBadge from './BotBadge';
 import type { LobbyPlayer, TeamId } from '../types';
 
 export default function WaitingRoom() {
@@ -157,7 +158,7 @@ export default function WaitingRoom() {
                     <button
                       type="button"
                       onClick={() => removeAI(p.username)}
-                      className="text-[10px] font-display font-semibold text-slate-400 hover:text-rose-500 transition"
+                      className="min-h-11 px-2 -my-2 flex items-center touch-manipulation text-[10px] font-display font-semibold text-slate-400 hover:text-rose-500 transition"
                     >
                       Remove
                     </button>
@@ -184,7 +185,7 @@ export default function WaitingRoom() {
             className={`w-full py-2.5 rounded-xl border border-dashed text-sm font-display font-semibold flex items-center justify-center gap-2 transition ${
               canAddAI
                 ? 'border-[#7B6FA0]/40 text-[#7B6FA0] hover:bg-white/60 hover:border-[#7B6FA0]/70'
-                : 'border-white/60 text-slate-300 cursor-not-allowed'
+                : 'border-[#7B6FA0]/30 text-slate-400 opacity-60 cursor-not-allowed'
             }`}
           >
             <Bot size={16} />
@@ -248,18 +249,6 @@ function Switch({ checked, onClick, label }: { checked: boolean; onClick: () => 
   );
 }
 
-function BotBadge() {
-  return (
-    <span
-      title="AI player"
-      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-[#7B6FA0]/10 text-[#7B6FA0] text-[9px] font-display font-semibold flex-shrink-0"
-    >
-      <Bot size={10} />
-      AI
-    </span>
-  );
-}
-
 function TeamCard({
   teamId, seats, title, seatCount, players, myUsername, onSelectSeat, onSeatAI, onRemoveAI, canSeatAI,
 }: {
@@ -295,12 +284,12 @@ function TeamCard({
               <Avatar seed={player.avatarSeed} size={32} />
               <span className="flex-1 min-w-0 flex items-center gap-1 text-left">
                 <span className="text-xs font-medium text-slate-700 truncate">{player.username}</span>
-                <BotBadge />
+                <BotBadge iconOnly />
               </span>
               <button
                 type="button"
                 onClick={() => onRemoveAI(player.username)}
-                className="text-[10px] font-display font-semibold text-slate-400 hover:text-rose-500 transition flex-shrink-0"
+                className="min-h-11 px-2 -my-2 flex items-center touch-manipulation text-[10px] font-display font-semibold text-slate-400 hover:text-rose-500 transition flex-shrink-0"
               >
                 Remove
               </button>

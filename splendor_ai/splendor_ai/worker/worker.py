@@ -139,6 +139,7 @@ def run_once(cfg: WorkerConfig, path: Optional[str], log: Logger) -> int:
         log("info", "no fixture given — using a freshly dealt 2p position")
 
     agent = MoveAgent(cfg, log=log)
+    agent.warmup()          # so the printed `ms` is a steady-state number
     decision = agent.decide(payload)
     print(json.dumps({
         "requestId": payload.get("requestId"),

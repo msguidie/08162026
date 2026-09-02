@@ -269,6 +269,7 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
             <div key={idx} data-player-panel={idx} className={`relative min-w-0 ${resigned ? 'opacity-35' : ''}`}>
               {resigned && <div className="absolute top-0.5 right-0.5 z-10 text-[7px] leading-none text-red-500 font-display">OUT</div>}
               <PlayerInfo player={seat} isMe={false} mobile
+                isAI={replay.meta.players[idx]?.isAI === true}
                 isCurrentTurn={!resigned && isPlaying && gameState.currentPlayerIndex === idx}
                 gameMode={gameState.gameMode}
                 cardDeltas={opponentCardDeltas[idx] || {}} />
@@ -285,6 +286,7 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
               className={`flex-1 min-w-[220px] max-w-[280px] ${resigned ? 'opacity-30' : ''}`}>
               {resigned && <div className="text-[9px] text-red-400/70 text-center mb-0.5 font-display">Resigned</div>}
               <PlayerInfo player={seat} isMe={false}
+                isAI={replay.meta.players[idx]?.isAI === true}
                 isCurrentTurn={!resigned && isPlaying && gameState.currentPlayerIndex === idx}
                 compact isPulsing={false}
                 gameMode={gameState.gameMode}
@@ -299,6 +301,7 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
         {useSideLayout && leftPlayer && (
           <div data-player-panel={leftPlayer.idx} className={`hidden md:flex w-[230px] flex-col items-center pt-1 flex-shrink-0 ${leftPlayer.resigned ? 'opacity-30' : ''}`}>
             <PlayerInfo player={leftPlayer.player} isMe={false}
+              isAI={replay.meta.players[leftPlayer.idx]?.isAI === true}
               isCurrentTurn={!leftPlayer.resigned && isPlaying && gameState.currentPlayerIndex === leftPlayer.idx}
               compact gameMode={gameState.gameMode}
               cardDeltas={opponentCardDeltas[leftPlayer.idx] || {}} />
@@ -343,6 +346,7 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
         {useSideLayout && rightPlayer && (
           <div data-player-panel={rightPlayer.idx} className={`hidden md:flex w-[230px] flex-col items-center pt-1 flex-shrink-0 ${rightPlayer.resigned ? 'opacity-30' : ''}`}>
             <PlayerInfo player={rightPlayer.player} isMe={false}
+              isAI={replay.meta.players[rightPlayer.idx]?.isAI === true}
               isCurrentTurn={!rightPlayer.resigned && isPlaying && gameState.currentPlayerIndex === rightPlayer.idx}
               compact gameMode={gameState.gameMode}
               cardDeltas={opponentCardDeltas[rightPlayer.idx] || {}} />
@@ -353,11 +357,13 @@ function ReplayStage({ replay, onExit }: { replay: ReplayData; onExit: () => voi
       {/* ── Bottom: watched seat ── */}
       <div className="md:hidden flex-shrink-0 mt-auto pt-1 w-full max-w-[600px] mx-auto" data-player-panel={perspective}>
         <PlayerInfo player={me} isMe mobile
+          isAI={replay.meta.players[perspective]?.isAI === true}
           isCurrentTurn={isPlaying && gameState.currentPlayerIndex === perspective}
           gameState={gameState} playerIndex={perspective} gameMode={gameState.gameMode} />
       </div>
       <div className="hidden md:block flex-shrink-0 mt-1" data-player-panel={perspective}>
         <PlayerInfo player={me} isMe
+          isAI={replay.meta.players[perspective]?.isAI === true}
           isCurrentTurn={isPlaying && gameState.currentPlayerIndex === perspective}
           gameState={gameState} playerIndex={perspective} gameMode={gameState.gameMode} />
       </div>

@@ -631,3 +631,184 @@ fails loudly at startup instead of playing garbage.
 milestone checkpoints (gen 5/10/20/40/80 — the ladder's pinned historical
 anchors) and every arena report; the rest can be pruned. Keep the reports —
 they are the only record of what the strength claims were measured against.
+
+---
+
+## Training — self-play (`splendor_ai/selfplay/`)
+
+The AlphaZero loop of `docs/AI_DESIGN.md` §1.8: actors play games with
+determinized PUCT search, the search's visit distribution and the game's
+per-seat outcome become training targets, a learner fits the network to a
+rolling window of those targets and republishes weights that the actors pick
+up mid-game. Nothing in the loop is hand-shaped: the only reward is the
+terminal value vector of §1.2.
+
+### Architecture
+
+```
+                         run_dir/weights/latest.pt
+       (learner writes atomically; everyone else polls mtime+size)
+                                   │
+  ┌────────────────────────────────┼───────────────────────────────────────┐
+  │ MAIN PROCESS                   ▼                                       │
+  │  learner  ── AdamW, warmup+cosine, bf16 on cuda:0 ── publish every N    │
+  │     ▲                                                    steps         │
+  │     │ uniform sample                                                   │
+  │  replay buffer  ── rolling window of whole generations (4 → 20) ──┐    │
+  │     ▲  compact records: state bytes + sparse policy + z[4] + aux  │    │
+  │     │                                                            │    │
+  │  record queue ◄──────────────────────────────────────────────┐   │    │
+  └─────┼────────────────────────────────────────────────────────┼───┼────┘
+        │                                                        │   │
+  ┌─────┴─────────────────────┐   ┌────────────────────┐   ┌─────┴───┴─────┐
+  │ ACTOR x N (CPU)           │   │ INFERENCE SERVER   │   │ EVAL PROCESS  │
+  │  G games in lockstep      │   │  x1 per GPU        │   │ NetBot,       │
+  │  per move:                │──►│  coalesce ≤max_batch│  │ SearchBot vs  │
+  │   25% full search (600),  │◄──│  or max_wait_ms    │   │ random+greedy │
+  │       noise, RECORDED     │   │  bf16 inference    │   │ paired, seat- │
+  │   75% fast search (120)   │   │  hot-reloads weights│  │ swapped       │
+  │  encode_batch over leaves │   └────────────────────┘   └───────────────┘
+  │  C5 augmentation on write │      (inference.mode: server)
+  └───────────────────────────┘      inproc → the net lives in the actor
+```
+
+One *wave* of an actor: open the next move in each of its `G` games, take one
+simulation from every tree, `encode_batch` all the leaves at once, one
+evaluator call, back the values up, repeat until every tree has spent its
+budget, then play the moves. Encoding a leaf costs ~85 µs alone and ~19 µs
+inside a batch, which is the whole reason actors hold many games instead of
+one.
+
+### Commands
+
+```bash
+# G3 smoke gate — the full loop on 4 CPU cores in ~21 minutes, prints the
+# learning curve and the pass/fail line at the end
+bash splendor_ai/scripts/smoke_cpu.sh                  # → runs/smoke_cpu
+bash splendor_ai/scripts/smoke_cpu.sh /tmp/run1        # somewhere else
+
+# the same loop, any config, any override (yaml value syntax after '=')
+python -m splendor_ai.selfplay.train --config splendor_ai/configs/smoke_cpu.yaml
+python -m splendor_ai.selfplay.train --config splendor_ai/configs/nscc_4xa100.yaml \
+    --set selfplay.actors=48 --set search_full.sims=800 --set learner.batch=8192
+
+# resume a run in place (config.yaml is read back from RUN_DIR)
+python -m splendor_ai.selfplay.train --resume runs/nscc0
+
+# what will actually run, after YAML + --set, without starting anything
+python -m splendor_ai.selfplay.train --config ... --print-config
+
+# evaluate one checkpoint against the fixed anchors and exit
+python -m splendor_ai.selfplay.train --config splendor_ai/configs/smoke_cpu.yaml \
+    --evaluate runs/smoke_cpu/checkpoints/gen_0008.pt
+
+# optional warm start: NN-free MCTS teacher → supervised pre-train
+python -m splendor_ai.selfplay.bootstrap --config splendor_ai/configs/smoke_cpu.yaml \
+    --games 40 --sims 96 --steps 800 --out runs/smoke_cpu/weights/latest.pt
+
+# tests (the loop test is opt-in because it costs ~3 minutes of CPU)
+pytest splendor_ai/tests/test_selfplay_*.py -q
+SPLENDOR_SELFPLAY_SMOKE=1 pytest splendor_ai/tests/test_selfplay_loop.py -q
+```
+
+Every process sets `OMP/MKL/OPENBLAS/NUMEXPR/VECLIB_NUM_THREADS=1` before
+numpy or torch is imported (`splendor_ai/selfplay/__init__.py`, which Python
+guarantees runs before any submodule) and calls `torch.set_num_threads(1)`.
+On a 64-core node, 56 actors each spinning up a 64-thread BLAS pool is the
+single most common way a correct pipeline runs at a fraction of its speed with
+no error message anywhere.
+
+### What lands in `run_dir`
+
+| path | contents |
+| --- | --- |
+| `config.yaml` | the fully resolved config, including `--set` overrides |
+| `metrics.jsonl` | one JSON object per line: `run`, `learner`, `progress`, `generation`, `eval`, `actor_restart`, `checkpoint`, `summary` |
+| `weights/latest.pt` | the published net; actors and inference servers poll it |
+| `checkpoints/gen_XXXX.pt` | one per generation — opponent pool, arena history |
+| `trainer_state.pt` | model + optimizer + counters + RNG (resume) |
+| `replay.npz` | the replay buffer (resume) |
+| `tb/` | TensorBoard mirror, when `tensorboard` is importable |
+
+### Metrics, and what they mean
+
+| key | meaning / what a bad value looks like |
+| --- | --- |
+| `sims_per_s`, `moves_per_s`, `games_per_s` | actor throughput, aggregated over actors. `sims_per_s` collapsing usually means thread oversubscription or an inference server that stopped coalescing. |
+| `records_per_s` | *augmented* training samples entering the buffer (5× the recorded positions with C5 augmentation on). |
+| `reuse` | `samples_consumed / records_seen`. The replay-ratio throttle holds it near `learner.replay_ratio` (target 4–8). Much higher = the learner is overfitting stale data; much lower = the learner is starved. |
+| `value_mse`, `value_explained_variance` | value head against the outcome. EV climbing from 0 towards ~0.5 is the clearest early sign the loop is learning; EV stuck at 0 with a falling policy loss is the seal256 failure mode (§4) and means the value target is wrong, not weak. |
+| `policy_entropy` vs `target_entropy` | the net's entropy should fall towards the search target's, not below it. Below it = the policy is collapsing (lr too high, or forced-playout pruning too aggressive). |
+| `policy_top1_agreement` | how often the net's argmax matches the search's. Rises from ~1/num_legal towards ~0.7. |
+| `disagreement` (actor) | the same quantity measured *online* at the root, i.e. how much search is still adding. It should fall, and it should never reach 0. |
+| `stuck_rate`, `truncation_rate` | deadlocked seats (resigned, §1.2) and games cut at `max_plies`. Truncations are labelled and their value target carries weight 0.3; a rising truncation rate in 3p/4p is a real signal, not noise. |
+| `mode_plies` | mean game length per mode; the curriculum's sanity check. |
+| `net_vs_random`, `net_vs_greedy`, `search_vs_greedy` | paired seat-swapped win rates against the fixed anchors. Paired = both games of a pair use the same deck seed, so only the seating differs. |
+| `actor_restarts` | an actor died and was restarted. Non-zero deserves a look at its traceback in the job log; actors log and re-raise, never swallow. |
+
+### Go / no-go gates (`docs/AI_DESIGN.md` §2)
+
+* **G3 (this sandbox, CPU, ~21 min).** `scripts/smoke_cpu.sh` must reach
+  **NetBot ≥ 80% vs RandomBot** and **SearchBot@48 > 55% vs GreedyBot**, with
+  checkpoint/resume working and the `obs_version` gate firing. The script
+  prints the per-generation curve and a PASS/FAIL line.
+* **G4 (NSCC, first job).** ≥400k sims/s node-wide, ≥250k evals/s per
+  inference GPU, clean resume. Read `progress.sims_per_s` and the inference
+  server's `rows/seconds`.
+* **G5 (NSCC, learning).** Generation 10 ≥85% vs the MCTS anchor in 2p with a
+  monotone anchored Elo curve.
+
+The smoke config sets `selfplay.win_threshold: 8` — an INDIVIDUAL-only engine
+override (§4 "reduced-threshold smoke matrix") that shortens games so that a
+non-learning full game can be diagnosed against a working short one. It is
+**never** valid for a deployment run: the encoder still normalises its
+threshold features against 15, so a net trained at 8 is a diagnostic, not an
+artefact. `configs/nscc_4xa100.yaml` sets it to `null` and the config
+validator refuses it for any team mode.
+
+### Switching the learner to PPO
+
+`docs/AI_DESIGN.md` keeps masked PPO as the fallback learner: same actors,
+encoder, network, replay format and arena, different target producer.
+
+```yaml
+learner:
+  algorithm: ppo        # or: --set learner.algorithm=ppo
+```
+
+`train.py` then constructs `selfplay/ppo_learner.py::PPOLearner` instead of the
+AlphaZero learner; it exposes the same `ready / train_step / publish /
+save_generation / state_dict / load_state_dict` surface, so nothing else in the
+orchestrator changes. **This path is partially implemented**: the clipped
+surrogate, additive `-1e9` masking, GAE over per-seat decision points and
+margin-scaled terminal rewards are written and unit-tested, but the search-free
+actor branch that would feed it (sample the move from the masked policy, record
+every move with its `log_prob`) is a documented TODO at the top of that module.
+Do not switch it on for a production run without finishing that list.
+
+### Tuning knobs that actually matter
+
+`--set` reaches every leaf; the ones worth knowing:
+
+| knob | effect |
+| --- | --- |
+| `selfplay.actors`, `selfplay.games_per_actor` | the parallel layout. Concurrent games = actors × games_per_actor; more games per actor means bigger evaluator batches and better CPU efficiency, at the cost of RAM per actor. |
+| `search_full.sims` / `search_fast.sims` / `selfplay.pcr_full_prob` | playout cap randomization. Expected sims per move = `p·full + (1-p)·fast`. |
+| `search_full.universes` | PIMC determinizations cycled by simulation index (6 in training, 16–32 at deployment). |
+| `search_full.root: gumbel` | the Gumbel/sequential-halving root with completed-Q targets (§4); A/B it against PUCT. |
+| `selfplay.augment_rotations` | 1 = off, 5 = the whole C5 colour group. |
+| `replay.window_start/window_end/window_ramp_generations` | the rolling window, trimmed by whole generations. |
+| `learner.replay_ratio` | sample reuse target; the throttle that keeps the learner from spinning on stale data. |
+| `learner.value_blend` | 0 = pure outcome target, 0.5 = the judges' `0.5·root Q + 0.5·outcome` blend. The root value is stored in every record, so this can be changed without regenerating data. |
+| `selfplay.mixed_game_frac`, `selfplay.opponent_weights` | league diversity: fraction of games with 1–2 seats played by a frozen historical checkpoint or the greedy anchor. Only current-net seats are recorded. |
+| `selfplay.phases` | the curriculum; each phase may override the mode mixture and the search budgets. |
+
+### DDP
+
+The learner is DDP-ready but DDP is **off** by default and untested here: with
+`WORLD_SIZE > 1` the model is wrapped in `DistributedDataParallel` and each
+rank draws `batch // world_size` samples so the effective batch is unchanged
+(`learner.local_batch`). For a ~13M-parameter MLP one A100 is already >15×
+oversupplied — judges.md argues DDP would add NCCL init, sharded checkpointing
+and silent-hang failure modes for zero throughput. Revisit above ~100M
+parameters.

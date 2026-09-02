@@ -42,16 +42,15 @@ import hashlib
 import json
 import os
 import shutil
-import sys
 import time
 import warnings
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from .encode import OBS_DIM, OBS_VERSION
-from .model import (ACTION_VERSION, NetConfig, SplendorNet, count_params,
+from .model import (ACTION_VERSION, SplendorNet, count_params,
                     load_checkpoint, save_checkpoint)
 from .rules.actions import NUM_ACTIONS
 

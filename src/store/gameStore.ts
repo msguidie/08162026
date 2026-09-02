@@ -32,6 +32,8 @@ interface GameStore {
   /** AI is enabled on this server and a worker is connected (docs/AI_BRIDGE.md §3). */
   lobbyAiAvailable: boolean;
   gameState: GameState | null;
+  /** Seat indices played by AI bots in the current game (docs/AI_BRIDGE.md §3). */
+  aiSeats: number[];
   actionMode: ActionMode;
   pendingTileChoice: number[] | null; // tile IDs to choose from
 
@@ -132,6 +134,8 @@ const useGameStore = create<GameStore>((set, get) => {
       playerIndex: number;
       gameState: GameState;
       isReconnect?: boolean;
+      /** Absent on servers that predate the AI bridge. */
+      aiSeats?: number[];
     }) => {
       const restoredActionMode: ActionMode =
         data.gameState.currentPlayerIndex === data.playerIndex && data.gameState.turnAction?.type === 'RESERVE'
@@ -144,6 +148,7 @@ const useGameStore = create<GameStore>((set, get) => {
         roomId: data.roomId,
         playerIndex: data.playerIndex,
         gameState: data.gameState,
+        aiSeats: Array.isArray(data.aiSeats) ? data.aiSeats : [],
         actionMode: restoredActionMode,
         pendingTileChoice: null,
         disconnectedPlayers: new Set(),
@@ -273,6 +278,7 @@ const useGameStore = create<GameStore>((set, get) => {
     playerIndex: -1,
     lobbyPlayers: [],
     gameState: null,
+    aiSeats: [],
     actionMode: null,
     pendingTileChoice: null,
     lastActionResult: null,
@@ -311,6 +317,12 @@ const useGameStore = create<GameStore>((set, get) => {
           clearTimeout(connectTimeout);
           set({ socket, connectionStatus: 'connected' });
           setupSocket(socket);
+          // This socket is brand new, so the server has no session for it yet.
+          // Re-send the login we already hold so a later `enter_lobby` (e.g.
+          // after Leave Lobby → Enter Lobby) is not rejected with
+          // "Login required". Re-logging in is idempotent server-side.
+          const account = get().myAccount;
+          if (account) socket.emit('login', { username: account.username }, () => {});
           heartbeatInterval = setInterval(() => socket.emit('ping'), CONNECTION_CONFIG.HEARTBEAT_INTERVAL);
           resolve();
         });

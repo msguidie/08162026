@@ -21,7 +21,7 @@ export default function GameBoard() {
     gameState, playerIndex, actionMode, pendingTileChoice,
     setActionMode, sendAction, chooseBonusTile,
     returnToLobby, quitRoom, resign, lastActionResult,
-    disconnectedPlayers,
+    disconnectedPlayers, aiSeats,
   } = useGameStore();
 
   const [showMenu, setShowMenu] = useState(false);
@@ -392,6 +392,7 @@ export default function GameBoard() {
             <div key={idx} data-player-panel={idx} className={`relative min-w-0 ${resigned ? 'opacity-35 pointer-events-none' : ''}`}>
               {resigned && <div className="absolute top-0.5 right-0.5 z-10 text-[7px] leading-none text-red-500 font-display">OUT</div>}
               <PlayerInfo player={player} isMe={false} mobile
+                isAI={aiSeats.includes(idx)}
                 isCurrentTurn={!resigned && gameState.currentPlayerIndex === idx}
                 isDisconnected={disconnectedPlayers.has(player.username)}
                 gameMode={gameState.gameMode}
@@ -409,6 +410,7 @@ export default function GameBoard() {
               className={`flex-1 min-w-[220px] max-w-[280px] ${resigned ? 'opacity-30 pointer-events-none' : ''}`}>
               {resigned && <div className="text-[9px] text-red-400/70 text-center mb-0.5 font-display">Resigned</div>}
               <PlayerInfo player={player} isMe={false} isCurrentTurn={!resigned && gameState.currentPlayerIndex === idx}
+                isAI={aiSeats.includes(idx)}
                 compact isPulsing={false} isDisconnected={disconnectedPlayers.has(player.username)}
                 gameMode={gameState.gameMode}
                 clockLabel={playerClocks[idx]?.label} clockUrgent={playerClocks[idx]?.urgent}
@@ -424,6 +426,7 @@ export default function GameBoard() {
         {useSideLayout && leftPlayer && (
           <div data-player-panel={leftPlayer.idx} className={`hidden md:flex w-[230px] flex-col items-center pt-1 flex-shrink-0 ${leftPlayer.resigned ? 'opacity-30' : ''}`}>
             <PlayerInfo player={leftPlayer.player} isMe={false} isCurrentTurn={!leftPlayer.resigned && gameState.currentPlayerIndex === leftPlayer.idx}
+              isAI={aiSeats.includes(leftPlayer.idx)}
               compact isDisconnected={disconnectedPlayers.has(leftPlayer.player.username)}
               gameMode={gameState.gameMode}
               clockLabel={playerClocks[leftPlayer.idx]?.label} clockUrgent={playerClocks[leftPlayer.idx]?.urgent}
@@ -490,6 +493,7 @@ export default function GameBoard() {
         {useSideLayout && rightPlayer && (
           <div data-player-panel={rightPlayer.idx} className={`hidden md:flex w-[230px] flex-col items-center pt-1 flex-shrink-0 ${rightPlayer.resigned ? 'opacity-30' : ''}`}>
             <PlayerInfo player={rightPlayer.player} isMe={false} isCurrentTurn={!rightPlayer.resigned && gameState.currentPlayerIndex === rightPlayer.idx}
+              isAI={aiSeats.includes(rightPlayer.idx)}
               compact isDisconnected={disconnectedPlayers.has(rightPlayer.player.username)}
               gameMode={gameState.gameMode}
               clockLabel={playerClocks[rightPlayer.idx]?.label} clockUrgent={playerClocks[rightPlayer.idx]?.urgent}
@@ -501,6 +505,7 @@ export default function GameBoard() {
       {/* ── Bottom: self panel (action buttons integrated) ── */}
       <div className="md:hidden flex-shrink-0 mt-auto pt-1 w-full max-w-[600px] mx-auto" data-player-panel={playerIndex}>
         <PlayerInfo player={me} isMe={true} mobile isCurrentTurn={isMyTurn}
+          isAI={aiSeats.includes(playerIndex)}
           actionMode={actionMode} gameState={gameState} playerIndex={playerIndex}
           gameMode={gameState.gameMode}
           clockLabel={playerClocks[playerIndex]?.label} clockUrgent={playerClocks[playerIndex]?.urgent}
@@ -514,6 +519,7 @@ export default function GameBoard() {
       </div>
       <div className="hidden md:block flex-shrink-0 mt-1" data-player-panel={playerIndex}>
         <PlayerInfo player={me} isMe={true} isCurrentTurn={isMyTurn}
+          isAI={aiSeats.includes(playerIndex)}
           actionMode={actionMode} gameState={gameState} playerIndex={playerIndex}
           gameMode={gameState.gameMode}
           clockLabel={playerClocks[playerIndex]?.label} clockUrgent={playerClocks[playerIndex]?.urgent}
