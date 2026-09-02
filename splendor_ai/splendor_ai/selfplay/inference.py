@@ -240,18 +240,22 @@ class InferenceServer:
         return pending
 
     def run(self, request_q, response_qs: Dict[int, Any], stop_event) -> None:
-        import torch
-
+        # A ``None`` on the request queue retires THIS server only (the stop
+        # event is shared by every process in the run and must not be set by a
+        # single server draining its queue).
+        retiring = False
         while not stop_event.is_set():
             batch = self._gather(request_q, stop_event)
             if not batch:
+                if retiring:
+                    break
                 self.watcher.poll()
                 continue
             if batch[-1] is None:
                 batch = batch[:-1]
+                retiring = True
                 if not batch:
                     break
-                stop_event.set()
             t0 = time.perf_counter()
             try:
                 self._serve(batch, response_qs)

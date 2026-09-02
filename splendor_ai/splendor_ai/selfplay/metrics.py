@@ -13,12 +13,16 @@ run working?"):
    games of a pair use the same deck seed, so only the seating differs and the
    deal variance cancels (judges.md "EVALUATION BUDGET").
 
-``splendor_ai/arena.py`` belongs to another stream.  If it is importable and
-exposes a paired-match entry point we use it; otherwise we fall back to
-``bots.play_game``, and to a local copy of its loop when the INDIVIDUAL
-win-threshold override is in force (``play_game`` has no hook for the engine
-config, and a smoke run trained at threshold 8 has to be *evaluated* at
-threshold 8 or the number means nothing).
+``splendor_ai/arena.py`` belongs to another stream and is the *ladder*: a whole
+schedule of pairings with a joint Bradley-Terry fit
+(``arena.run_matches(bots, modes, ...)``), run between training jobs.  The
+in-run check here is deliberately smaller — a handful of paired games per
+generation, cheap enough to run every generation without stealing the actors'
+cores.  If ``arena`` ever grows a light ``paired_match`` entry point we use it;
+otherwise we fall back to ``bots.play_game``, and to a local copy of its loop
+when the INDIVIDUAL win-threshold override is in force (``play_game`` has no
+hook for the engine config, and a smoke run trained at threshold 8 has to be
+*evaluated* at threshold 8 or the number means nothing).
 """
 
 from __future__ import annotations
@@ -134,7 +138,12 @@ class SearchBot:
 # ── game driver ───────────────────────────────────────────────────────────
 
 def _arena_module():
-    """``splendor_ai.arena`` if the other stream has landed it, else None."""
+    """``splendor_ai.arena`` if it is importable, else None.
+
+    Only used when it offers a light per-pairing entry point; its
+    ``run_matches`` schedule builder is the between-jobs ladder, not something
+    to spin up inside a training run.
+    """
     try:
         from .. import arena                                # type: ignore
     except Exception:

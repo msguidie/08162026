@@ -36,6 +36,7 @@ and counts the restart.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import random
 import time
@@ -154,8 +155,6 @@ class Actor:
         sims = phase.sims_full if full else phase.sims_fast
         if sims is None:
             return base
-        import dataclasses
-
         return dataclasses.replace(base, sims=int(sims))
 
     def _pick_controllers(self, n: int) -> Tuple[List[str], bool]:
@@ -314,8 +313,6 @@ class Actor:
             full = (controller == _CURRENT
                     and self.rng.random() < self.cfg.selfplay.pcr_full_prob)
             search_cfg = self._search_cfg(full)
-            import dataclasses
-
             # PCR: noise only on the recorded full searches, never on the
             # cheap ones (KataGo; judges.md "SEARCH BUDGETS").
             search_cfg = dataclasses.replace(
