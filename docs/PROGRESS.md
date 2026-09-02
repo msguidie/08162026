@@ -20,16 +20,16 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done · ❌ blocked
 - ✅ validation: 16,000 games / 1.27M steps in all modes, 0 mismatches (two-way legal-set check), 73k steps/s
 
 ## Phase D — Training system (multiplayer AlphaZero, see docs/AI_DESIGN.md)
-- 🟨 D1 encoder (OBS v1), colour-symmetry, terminal values, network + checkpoint gate
-- 🟨 D1 search: determinization, PUCT/Gumbel MCTS with per-seat value vectors, evaluators, bots (random/greedy/MCTS anchor)
-- ⬜ D2 self-play system: actors, inference servers, replay window, learner, train orchestrator, configs, bootstrap
-- ⬜ D2 arena (paired seeds, seat rotation, Bradley–Terry), export
+- ✅ D1 encoder (OBS v1 = 860), C5 symmetry (exact on 100k states), terminal values, 12.5M-param net + checkpoint gate
+- ✅ D1 search: PIMC PUCT/Gumbel MCTS, evaluators, scheduler, bots; G2 passed (greedy ≥96% vs random; MCTS@400 81% vs greedy)
+- 🟨 D2 self-play system: actors, inference servers, replay window, learner, train orchestrator, configs, bootstrap
+- 🟨 D2 arena (paired seeds, seat rotation, Bradley–Terry), export, PBS scripts
 - ⬜ G3 CPU smoke run in this sandbox (beats random/greedy)
 - ⬜ PBS scripts + requirements
 
 ## Phase E — Deployment
 - ✅ server/aiBridge.js + aiFallback.js + lobby AI seats + WaitingRoom UI (126 server tests incl. bot e2e in 2p/1v2/2v2 and worker-crash fallback)
-- ⬜ splendor_ai/worker (Windows 3060) + run_worker.bat
+- 🟨 splendor_ai/worker (Windows 3060) + run_worker.bat
 - ⬜ local end-to-end: AI plays 2p / 1v2 / 2v2 against scripted humans
 
 ## Phase F — Docs & delivery
