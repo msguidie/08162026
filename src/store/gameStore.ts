@@ -4,8 +4,10 @@ import type {
   AppPhase, ConnectionStatus, GameState, LobbyPlayer,
   Account, ActionMode, ActionResult, BonusTile, LobbyState,
   LobbyTeamFormat, TeamId, TeamLayout, TeamSeats,
+  ReplayData, ReplayIndexEntry,
 } from '../types';
 import { SERVER_URL, CONNECTION_CONFIG } from '../constants';
+import { fetchReplay, fetchReplayList } from '../replay/replayApi';
 
 export interface Toast {
   id: string;
@@ -36,6 +38,14 @@ interface GameStore {
   disconnectedPlayers: Set<string>;
   toasts: Toast[];
 
+  // ── Replays (additive; see docs/REPLAY_FORMAT.md) ──
+  replayList: ReplayIndexEntry[];
+  replayListLoading: boolean;
+  replayListError: string | null;
+  currentReplay: ReplayData | null;
+  replayLoading: boolean;
+  replayError: string | null;
+
   connectToServer: () => Promise<void>;
   login: (username: string) => Promise<boolean>;
   enterLobby: () => void;
@@ -55,6 +65,12 @@ interface GameStore {
   disconnect: () => void;
   addToast: (message: string, type?: Toast['type']) => void;
   removeToast: (id: string) => void;
+
+  openReplayBrowser: () => void;
+  refreshReplayList: () => Promise<void>;
+  openReplay: (id: string) => Promise<void>;
+  closeReplayViewer: () => void;
+  closeReplayBrowser: () => void;
 }
 
 interface LobbyResponse {
@@ -67,6 +83,9 @@ const EMPTY_TEAM_SEATS: TeamSeats = [[null, null], [null, null]];
 
 const useGameStore = create<GameStore>((set, get) => {
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  // Tokens so a slow replay response cannot overwrite a newer one.
+  let replayListRequest = 0;
+  let replayRequest = 0;
 
   function applyLobbyState(lobbyState?: LobbyState) {
     if (!lobbyState) return;
@@ -259,6 +278,12 @@ const useGameStore = create<GameStore>((set, get) => {
     lobbyTeamLayout: 'ADJACENT',
     lobbyTeamSeats: EMPTY_TEAM_SEATS,
     lobbyUnlimitedTime: false,
+    replayList: [],
+    replayListLoading: false,
+    replayListError: null,
+    currentReplay: null,
+    replayLoading: false,
+    replayError: null,
 
     connectToServer: async () => {
       const existingSocket = get().socket;
@@ -468,6 +493,53 @@ const useGameStore = create<GameStore>((set, get) => {
 
     addToast: (message, type = 'info') => showToast(message, type),
     removeToast: (id) => set(s => ({ toasts: s.toasts.filter(t => t.id !== id) })),
+
+    // ── Replays: read-only REST, independent of the socket session ──
+    openReplayBrowser: () => {
+      set({ appPhase: 'REPLAY_BROWSER' });
+      void get().refreshReplayList();
+    },
+
+    refreshReplayList: async () => {
+      const token = ++replayListRequest;
+      set({ replayListLoading: true, replayListError: null });
+      try {
+        const { games } = await fetchReplayList();
+        if (token !== replayListRequest) return;
+        set({ replayList: games, replayListLoading: false });
+      } catch (err) {
+        if (token !== replayListRequest) return;
+        set({
+          replayListLoading: false,
+          replayListError: err instanceof Error ? err.message : 'Failed to load replays',
+        });
+      }
+    },
+
+    openReplay: async (id: string) => {
+      const token = ++replayRequest;
+      set({ appPhase: 'REPLAY_VIEWER', currentReplay: null, replayLoading: true, replayError: null });
+      try {
+        const replay = await fetchReplay(id);
+        if (token !== replayRequest || get().appPhase !== 'REPLAY_VIEWER') return;
+        set({ currentReplay: replay, replayLoading: false });
+      } catch (err) {
+        if (token !== replayRequest) return;
+        set({
+          replayLoading: false,
+          replayError: err instanceof Error ? err.message : 'Failed to load this replay',
+        });
+      }
+    },
+
+    closeReplayViewer: () => {
+      replayRequest++;
+      set({ appPhase: 'REPLAY_BROWSER', currentReplay: null, replayLoading: false, replayError: null });
+    },
+
+    closeReplayBrowser: () => {
+      set({ appPhase: 'LOGIN' });
+    },
   };
 });
 

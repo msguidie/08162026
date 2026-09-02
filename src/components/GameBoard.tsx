@@ -616,7 +616,7 @@ function formatMainTime(milliseconds: number): string {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
-function TeamGameOver({ gameState }: { gameState: GameState }) {
+export function TeamGameOver({ gameState }: { gameState: GameState }) {
   const winningTeamIds = gameState.gameResult?.winningTeamIds ?? [];
   const isDraw = winningTeamIds.length > 1;
   const winner = winningTeamIds.length === 1 ? winningTeamIds[0] : null;

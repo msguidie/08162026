@@ -111,7 +111,7 @@ export type ConnectionStatus =
   | 'idle' | 'waking_server' | 'connecting' | 'connected'
   | 'entering_lobby' | 'in_lobby' | 'reconnecting' | 'disconnected' | 'error';
 
-export type AppPhase = 'LOGIN' | 'WAITING_ROOM' | 'GAME';
+export type AppPhase = 'LOGIN' | 'WAITING_ROOM' | 'GAME' | 'REPLAY_BROWSER' | 'REPLAY_VIEWER';
 
 export interface LobbyPlayer {
   socketId: string;
@@ -140,4 +140,75 @@ export interface ActionResult {
   type: string;
   payload: Record<string, unknown>;
   actingPlayer: number;
+}
+
+// ── Replays (see docs/REPLAY_FORMAT.md — contract v1) ──
+
+/** One row of `replays/index.json`, as served by `GET /api/replays`. */
+export interface ReplayIndexEntry {
+  id: string;
+  t: number;          // game start (ms)
+  e: number;          // game end (ms)
+  mode: GameMode;
+  n: number;
+  players: string[];  // usernames, seat order
+  ai?: boolean[];
+  winners: number[] | null;
+  winningTeamIds: TeamId[] | null;
+  turns: number;
+}
+
+export interface ReplayPlayerMeta {
+  username: string;
+  avatarSeed: number;
+  teamId?: TeamId;
+  isAI?: boolean;
+}
+
+export interface ReplayGameResult {
+  scores: number[];
+  cards: number[];
+  resigned: number[];
+  winners: number[] | null;
+  winningTeamIds: TeamId[] | null;
+  reason: 'SCORE' | 'FORFEIT' | null;
+  rating: number[];
+}
+
+export interface ReplayMeta {
+  t: number;
+  e: number;
+  mode: GameMode;
+  layout: TeamLayout | null;
+  n: number;
+  clock: boolean;
+  first: number;
+  result: ReplayGameResult | null;
+  players: ReplayPlayerMeta[];
+}
+
+/** Stored action tuple, e.g. [0, 'G', [0, 1, 2]] or [1, 'B', 12, 'b']. */
+export type ReplayActionCode = 'G' | 'R' | 'RD' | 'B' | 'N' | 'X' | 'T';
+export type ReplayActionEntry = [number, ReplayActionCode, ...Array<number | number[] | string>];
+
+/** `ActionResult` as produced by the replay engine (adds auto-claimed noble info). */
+export interface ReplayActionResult extends ActionResult {
+  tileClaimed?: { tileId: number; playerIndex: number } | null;
+}
+
+export interface ReplayFrame {
+  i: number;
+  turn: number;
+  actor: number | null;
+  action: ReplayActionEntry | null;
+  result: ReplayActionResult | null;
+  /** clientView(state): decks stripped, every reserved card visible (hidden per perspective client-side). */
+  state: GameState & { pendingTileChoice?: number[] | null; _pendingTileChoice?: number[] | null };
+  pendingTileChoice?: number[] | null;
+}
+
+export interface ReplayData {
+  id: string;
+  meta: ReplayMeta;
+  frames: ReplayFrame[];
 }

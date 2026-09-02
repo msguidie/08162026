@@ -11,9 +11,9 @@ Legend: ⬜ todo · 🟨 in progress · ✅ done · ❌ blocked
 
 ## Phase B — Replay feature
 - ✅ server/replayRecorder.js, replayEngine.js, replayStore.js, replayGithub.js + index.js hooks + REST (82 tests incl. socket.io e2e in all modes)
-- ⬜ src/replay/* (browser + viewer), LoginScreen button, store/App wiring
+- ✅ src/replay/* (browser + viewer), LoginScreen button, store/App wiring (build clean; mock-server screenshots in docs/screenshots)
 - ⬜ Node end-to-end test (scripted games in all modes → replay reconstructable)
-- ⬜ Playwright screenshots (mobile + desktop)
+- ✅ Playwright screenshots (mobile + desktop) against the mock; ⬜ against the real server
 
 ## Phase C — Python engine + cross-validation
 - ⬜ splendor_ai/rules (cards, engine, actions, encode) + pytest
