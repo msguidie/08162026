@@ -122,7 +122,8 @@ the per-other-seat total shortfall in seat-relative order.
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from array import array
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -158,99 +159,129 @@ DECK_OFF = TILE_OFF + MAX_TILE_CHOICES * TILE_FEATURES                  # 772
 GLOBAL_OFF = DECK_OFF + DECK_FEATURES                                   # 820
 OBS_DIM = GLOBAL_OFF + GLOBAL_FEATURES                                  # 860
 
-#: Number of card slots the encoder evaluates in one shot: 12 board + 3 own
-#: reserved + 9 opponent reserved.
+#: Card slots evaluated in one shot: 12 board + 3 own reserved + 9 opponent.
 _CARD_SLOTS = BOARD_SLOTS + MAX_RESERVED + OTHER_SEATS * MAX_RESERVED   # 24
 _OWN_SLOT0 = BOARD_SLOTS
 _OTHER_SLOT0 = BOARD_SLOTS + MAX_RESERVED
 
+#: Sentinel rows appended to the card tables: ``EMPTY_CARD`` for an empty slot
+#: and ``HIDDEN_CARD0 + tier0`` for a card another seat took blind off a deck
+#: (all we may know is its tier).
+EMPTY_CARD = NUM_CARDS                      # 90
+HIDDEN_CARD0 = NUM_CARDS + 1                # 91..93
+EMPTY_TILE = NUM_TILES                      # 10
+
 #: Offsets of every contiguous 5-slot colour-major feature group.  The C5
 #: symmetry permutes exactly these (``symmetry.feature_perm`` is built from
 #: this list); every other feature is colour invariant.
-_COLOUR_GROUP_BASES: List[int] = []
+_GROUPS: List[int] = []
 for _slot in range(BOARD_SLOTS + MAX_RESERVED):
     _b = _slot * CARD_FEATURES
-    _COLOUR_GROUP_BASES += [_b, _b + 5, _b + 14]
+    _GROUPS += [_b, _b + 5, _b + 14]
 for _slot in range(OTHER_SEATS * MAX_RESERVED):
     _b = OTHER_RESERVED_OFF + _slot * OTHER_CARD_FEATURES
-    _COLOUR_GROUP_BASES += [_b, _b + 5, _b + 14]
+    _GROUPS += [_b, _b + 5, _b + 14]
 for _j in range(MAX_SEATS):
     _b = PLAYER_OFF + _j * PLAYER_FEATURES
-    _COLOUR_GROUP_BASES += [_b, _b + 6]
+    _GROUPS += [_b, _b + 6]
 for _i in range(MAX_TILE_CHOICES):
     _b = TILE_OFF + _i * TILE_FEATURES
-    _COLOUR_GROUP_BASES += [_b, _b + 5]
+    _GROUPS += [_b, _b + 5]
 for _t in range(3):
     for _bucket in range(3):
-        _COLOUR_GROUP_BASES.append(DECK_OFF + _t * 15 + _bucket * 5)
-_COLOUR_GROUP_BASES.append(GLOBAL_OFF)
-COLOUR_GROUP_BASES = tuple(_COLOUR_GROUP_BASES)
-del _slot, _b, _j, _i, _t, _bucket, _COLOUR_GROUP_BASES
+        _GROUPS.append(DECK_OFF + _t * 15 + _bucket * 5)
+_GROUPS.append(GLOBAL_OFF)
+COLOUR_GROUP_BASES: Tuple[int, ...] = tuple(_GROUPS)
+del _slot, _b, _j, _i, _t, _bucket, _GROUPS
 
 # ── static tables ─────────────────────────────────────────────────────────
 
-#: ``(90, 5)`` raw card costs.
-_CARD_COST = np.array(CARD_COST, dtype=np.float32)
-#: ``(90, 14)`` cost/7, reward one-hot, points/5, tier one-hot.
-_CARD_STATIC = np.zeros((NUM_CARDS, 14), dtype=np.float32)
-_CARD_STATIC[:, 0:5] = _CARD_COST / 7.0
-_CARD_STATIC[np.arange(NUM_CARDS), 5 + np.array(CARD_REWARD)] = 1.0
-_CARD_STATIC[:, 10] = np.array(CARD_POINTS, dtype=np.float32) / 5.0
-_CARD_STATIC[np.arange(NUM_CARDS), 11 + np.array(CARD_TIER0)] = 1.0
+#: ``(94, 5)`` raw card costs; the four sentinel rows cost nothing.
+_CARD_COST_EXT = np.zeros((NUM_CARDS + 4, NUM_COLORS), dtype=np.float32)
+_CARD_COST_EXT[:NUM_CARDS] = np.array(CARD_COST, dtype=np.float32)
 
-#: ``(10, 5)`` raw tile requirements.
-_TILE_REQ = np.array(TILE_REQ, dtype=np.float32)
-_TILE_REQ_SCALED = _TILE_REQ / 4.0
+#: ``(94, 25)`` colour-invariant part of a card block: cost/7, reward one-hot,
+#: points/5, tier one-hot, the (dynamic) columns 14-21 left at zero, present,
+#: known and deck_reserved.  Row ``EMPTY_CARD`` is all zeros; the three
+#: ``HIDDEN_CARD0`` rows carry only the tier one-hot, present and
+#: deck_reserved, exactly as §1.3 requires for an unknown card.
+_CARD_STATIC = np.zeros((NUM_CARDS + 4, OTHER_CARD_FEATURES), dtype=np.float32)
+_CARD_STATIC[:NUM_CARDS, 0:5] = _CARD_COST_EXT[:NUM_CARDS] / 7.0
+_CARD_STATIC[np.arange(NUM_CARDS), 5 + np.array(CARD_REWARD)] = 1.0
+_CARD_STATIC[:NUM_CARDS, 10] = np.array(CARD_POINTS, dtype=np.float32) / 5.0
+_CARD_STATIC[np.arange(NUM_CARDS), 11 + np.array(CARD_TIER0)] = 1.0
+_CARD_STATIC[:NUM_CARDS, 22] = 1.0
+for _t in range(3):
+    _CARD_STATIC[HIDDEN_CARD0 + _t, 11 + _t] = 1.0
+    _CARD_STATIC[HIDDEN_CARD0 + _t, 22] = 1.0      # present
+    _CARD_STATIC[HIDDEN_CARD0 + _t, 24] = 1.0      # deck_reserved
+del _t
+
+#: ``(11, 5)`` raw tile requirements plus an all-zero sentinel row.
+_TILE_REQ_EXT = np.zeros((NUM_TILES + 1, NUM_COLORS), dtype=np.float32)
+_TILE_REQ_EXT[:NUM_TILES] = np.array(TILE_REQ, dtype=np.float32)
 
 #: Deck-composition group of every card: ``tier*15 + bucket*5 + colour``.
 _POINT_BUCKET = np.array([0 if c.points == 0 else (1 if c.points <= 2 else 2)
                           for c in CARDS])
-_DECK_GROUP = np.array([(c.tier - 1) * 15 for c in CARDS]) \
-    + _POINT_BUCKET * 5 + np.array(CARD_REWARD)
-#: Total number of cards in each of the 45 groups (the "all cards" baseline).
+_DECK_GROUP = (np.array([(c.tier - 1) * 15 for c in CARDS])
+               + _POINT_BUCKET * 5 + np.array(CARD_REWARD))
+#: How many cards of each of the 45 groups exist in total.
 _GROUP_TOTALS = np.bincount(_DECK_GROUP, minlength=45).astype(np.float32)
+#: Same, extended with a 46th "not a card" group so that the sentinel rows of
+#: a card-slot array (empty slots and other seats' blind reserves) can be
+#: counted and thrown away in one :func:`numpy.bincount`.
+_DECK_GROUP_EXT = np.concatenate([_DECK_GROUP, [45, 45, 45, 45]])
 #: Deck size after the initial deal — 40/30/20 cards minus the 4 face up.
 _INITIAL_DECK = np.array([36.0, 26.0, 16.0], dtype=np.float32)
+_DECK_SCALE = 1.0 / _INITIAL_DECK
 
 _MODE_INDEX = {MODE_INDIVIDUAL: 0, MODE_TEAM: 1, MODE_ONE_V_TWO: 2}
+_LAYOUT_INDEX = {None: 0, "ADJACENT": 1, "OPPOSITE": 2}
 
-#: Win thresholds per side, used for the "excess" and "progress" features.
+#: Win thresholds per side, used by the "excess" and "progress" features.
 _THRESHOLD_INDIVIDUAL = 15.0
 _THRESHOLD_TEAM = 30.0
 _THRESHOLD_SOLO = 15.0
 _THRESHOLD_DUO = 34.0
 
-_ZEROS_CARD_BLOCK = np.zeros((_CARD_SLOTS, OTHER_CARD_FEATURES), dtype=np.float32)
-_ZEROS_TILE_BLOCK = np.zeros((MAX_TILE_CHOICES, TILE_FEATURES), dtype=np.float32)
+_PAD_CARD: Tuple[Tuple[int, ...], ...] = tuple(
+    (EMPTY_CARD,) * i for i in range(MAX_BOARD_SLOTS + 1))
+_PAD_TILE: Tuple[Tuple[int, ...], ...] = tuple(
+    (EMPTY_TILE,) * i for i in range(MAX_TILE_CHOICES + 1))
+_ZERO_PVEC = (0,) * 11
+_ZERO_PSCAL = (0,) * 6
+_HIDDEN_OF_TIER0 = tuple(HIDDEN_CARD0 + CARD_TIER0[c] for c in range(NUM_CARDS))
+
+#: Below this batch size the per-state path beats the vectorised one.
+_BATCH_MIN = 8
 
 
-# ── helpers ───────────────────────────────────────────────────────────────
+# ── shared helpers ────────────────────────────────────────────────────────
 
-def _side_totals(state: GameState) -> tuple:
-    """``(per-seat side total, per-seat side threshold, my/other progress)``
-    inputs — the aggregates the player and global blocks share."""
+def _side_totals(state: GameState) -> Tuple[List[float], List[float]]:
+    """Per-seat ``(side total, side threshold)`` — what the "excess" and
+    "threshold progress" features are measured against."""
     players = state.players
     mode = state.mode
     if mode == MODE_INDIVIDUAL:
-        totals = [float(p.score) for p in players]
-        thresholds = [_THRESHOLD_INDIVIDUAL] * len(players)
-        return totals, thresholds
-    t = [0.0, 0.0]
+        return ([float(p.score) for p in players],
+                [_THRESHOLD_INDIVIDUAL] * len(players))
+    team_total = [0.0, 0.0]
     for p in players:
         if p.team_id is not None:
-            t[p.team_id] += p.score
-    if mode == MODE_ONE_V_TWO:
-        thr = (_THRESHOLD_SOLO, _THRESHOLD_DUO)
-    else:
-        thr = (_THRESHOLD_TEAM, _THRESHOLD_TEAM)
-    totals = [t[p.team_id] if p.team_id is not None else 0.0 for p in players]
-    thresholds = [thr[p.team_id] if p.team_id is not None else
-                  _THRESHOLD_INDIVIDUAL for p in players]
+            team_total[p.team_id] += p.score
+    thr = ((_THRESHOLD_SOLO, _THRESHOLD_DUO) if mode == MODE_ONE_V_TWO
+           else (_THRESHOLD_TEAM, _THRESHOLD_TEAM))
+    totals = [team_total[p.team_id] if p.team_id is not None else 0.0
+              for p in players]
+    thresholds = [thr[p.team_id] if p.team_id is not None
+                  else _THRESHOLD_INDIVIDUAL for p in players]
     return totals, thresholds
 
 
 def _plies_to_round_leader(state: GameState) -> int:
-    """How many turns (1..active seats) until the round leader acts again."""
+    """Turns (1..active seats) until the round leader acts again."""
     n = state.num_players
     leader = state.round_start_player
     resigned = state.resigned
@@ -264,15 +295,47 @@ def _plies_to_round_leader(state: GameState) -> int:
     return n
 
 
-# ── the encoder ───────────────────────────────────────────────────────────
+def _card_slot_ids(state: GameState, seat: int, sink: List[int]) -> None:
+    """Append the 24 card-slot ids (board, my reserves, their reserves) of the
+    information set of ``seat``, padded with the sentinel rows."""
+    n = state.num_players
+    players = state.players
+    for row in state.board:
+        sink.extend(row)
+        sink.extend(_PAD_CARD[MAX_BOARD_SLOTS - len(row)])
+    reserved = players[seat].reserved
+    sink.extend(reserved)
+    sink.extend(_PAD_CARD[MAX_RESERVED - len(reserved)])
+    for j in range(1, MAX_SEATS):
+        if j >= n:
+            sink.extend(_PAD_CARD[MAX_RESERVED])
+            continue
+        p = players[(seat + j) % n]
+        public = p.reserved_public
+        for s, cid in enumerate(p.reserved):
+            sink.append(cid if public[s] else _HIDDEN_OF_TIER0[cid])
+        sink.extend(_PAD_CARD[MAX_RESERVED - len(p.reserved)])
+
+
+def _tableau_cards(state: GameState, sink: List[int]) -> None:
+    """Append every card in a tableau.  Together with the 24 card slots (the
+    board, my reserves and the publicly reserved cards of the other seats)
+    this is exactly the set of cards ``seat`` has seen, so the unseen pool is
+    ``all cards - (slots + tableaus)`` and another seat's blind reserve — a
+    sentinel in the slot array — correctly stays in the pool.""" 
+    for p in state.players:
+        sink.extend(p.cards)
+
+
+# ── single-state encoder ──────────────────────────────────────────────────
 
 def encode(state: GameState, seat: int,
            out: Optional[np.ndarray] = None) -> np.ndarray:
     """Encode ``state`` from the point of view of ``seat``.
 
-    ``out`` (a ``float32`` array of :data:`OBS_DIM` entries, or a writable row
-    of a batch) is filled in place and returned; a fresh array is allocated
-    when it is ``None``.
+    ``out`` (``float32``, :data:`OBS_DIM` entries — a row of a batch works)
+    is filled in place and returned; a fresh array is allocated when it is
+    ``None``.
     """
     if out is None:
         out = np.zeros(OBS_DIM, dtype=np.float32)
@@ -288,62 +351,26 @@ def encode(state: GameState, seat: int,
     mode = state.mode
     d = me.discount
     g = me.gems
-    gold = g[5]
 
-    # ---- card slots (board, my reserves, their reserves) -----------------
-    ids = [0] * _CARD_SLOTS
-    valid = [False] * _CARD_SLOTS
-    board = state.board
-    for t in range(3):
-        row = board[t]
-        base = t * MAX_BOARD_SLOTS
-        for s in range(len(row)):
-            ids[base + s] = row[s]
-            valid[base + s] = True
-    reserved = me.reserved
-    for s in range(len(reserved)):
-        ids[_OWN_SLOT0 + s] = reserved[s]
-        valid[_OWN_SLOT0 + s] = True
-    hidden: List[tuple] = []
-    known: List[float] = [0.0] * (OTHER_SEATS * MAX_RESERVED)
-    for j in range(1, n):
-        p = players[(seat + j) % n]
-        base = _OTHER_SLOT0 + (j - 1) * MAX_RESERVED
-        pub = p.reserved_public
-        for s, cid in enumerate(p.reserved):
-            if pub[s]:
-                ids[base + s] = cid
-                valid[base + s] = True
-                known[(j - 1) * MAX_RESERVED + s] = 1.0
-            else:
-                hidden.append((base + s, CARD_TIER0[cid]))
-
+    # ---- card slots ------------------------------------------------------
+    ids: List[int] = []
+    _card_slot_ids(state, seat, ids)
     idx = np.array(ids)
-    live = np.array(valid)
-    short = _CARD_COST[idx] - [d[0] + g[0], d[1] + g[1], d[2] + g[2],
-                               d[3] + g[3], d[4] + g[4]]
+    blk = _CARD_STATIC[idx]                                  # (24, 25) copy
+    short = _CARD_COST_EXT[idx] - [d[0] + g[0], d[1] + g[1], d[2] + g[2],
+                                   d[3] + g[3], d[4] + g[4]]
     np.maximum(short, 0.0, out=short)
     total_short = short.sum(1)
     max_short = short.max(1)
-
-    blk = np.empty((_CARD_SLOTS, OTHER_CARD_FEATURES), dtype=np.float32)
-    blk[:, 0:14] = _CARD_STATIC[idx]
+    real = idx < EMPTY_CARD
     short *= 1.0 / 7.0
     blk[:, 14:19] = short
     blk[:, 19] = np.minimum(total_short * 0.2, 1.0)
-    blk[:, 20] = total_short <= gold
+    blk[:, 20] = np.less_equal(total_short, g[5]) & real
     blk[:, 21] = np.minimum(
         np.maximum(np.ceil(total_short * (1.0 / 3.0)), max_short) * (1.0 / 6.0),
         1.0)
-    blk[:, 22] = 1.0
-    blk[:, 23:25] = 0.0
-    blk *= live[:, None]
-    blk[_OTHER_SLOT0:, 23] = known
-    for slot, tier0 in hidden:
-        blk[slot, 11 + tier0] = 1.0
-        blk[slot, 22] = 1.0
-        blk[slot, 24] = 1.0
-
+    blk[_OTHER_SLOT0:, 23] = real[_OTHER_SLOT0:]
     out[BOARD_OFF:OWN_RESERVED_OFF] = blk[:_OWN_SLOT0, :CARD_FEATURES].reshape(-1)
     out[OWN_RESERVED_OFF:OTHER_RESERVED_OFF] = \
         blk[_OWN_SLOT0:_OTHER_SLOT0, :CARD_FEATURES].reshape(-1)
@@ -374,10 +401,10 @@ def encode(state: GameState, seat: int,
             len(p.reserved) / 3.0,
             min(len(p.tiles) / 3.0, 1.0),
             1.0 if who in resigned else 0.0,
-            1.0,                                        # present
-            1.0 if j == 0 else 0.0,                     # is_self
+            1.0,                                          # present
+            1.0 if j == 0 else 0.0,                       # is_self
             1.0 if (j != 0 and my_team is not None
-                    and p.team_id == my_team) else 0.0,  # is_teammate
+                    and p.team_id == my_team) else 0.0,   # is_teammate
             1.0 if (mode == MODE_ONE_V_TWO and p.team_id == 0) else 0.0,
             1.0 if j == 0 else 0.0, 1.0 if j == 1 else 0.0,
             1.0 if j == 2 else 0.0, 1.0 if j == 3 else 0.0,
@@ -388,16 +415,14 @@ def encode(state: GameState, seat: int,
 
     # ---- noble tiles -----------------------------------------------------
     tiles = state.tiles
-    m = len(tiles)
-    if m > MAX_TILE_CHOICES:
-        m = MAX_TILE_CHOICES
+    m = len(tiles) if len(tiles) < MAX_TILE_CHOICES else MAX_TILE_CHOICES
     if m:
         tile_idx = np.array(tiles[:m])
-        req = _TILE_REQ[tile_idx]
+        req = _TILE_REQ_EXT[tile_idx]
         mine = np.maximum(req - [d[0], d[1], d[2], d[3], d[4]], 0.0)
         mine_total = mine.sum(1)
-        tb = _ZEROS_TILE_BLOCK.copy()
-        tb[:m, 0:5] = _TILE_REQ_SCALED[tile_idx]
+        tb = np.zeros((MAX_TILE_CHOICES, TILE_FEATURES), dtype=np.float32)
+        tb[:m, 0:5] = req * 0.25
         tb[:m, 5:10] = mine * 0.25
         tb[:m, 10] = mine_total * (1.0 / 12.0)
         tb[:m, 11] = 1.0
@@ -406,25 +431,16 @@ def encode(state: GameState, seat: int,
             others = np.array([players[(seat + j) % n].discount
                                for j in range(1, n)], dtype=np.float32)
             gap = np.maximum(req[None, :, :] - others[:, None, :], 0.0)
-            tb[:m, 13:13 + n - 1] = gap.sum(2).T * (1.0 / 12.0)
+            tb[:m, 13:12 + n] = gap.sum(2).T * (1.0 / 12.0)
         out[TILE_OFF:DECK_OFF] = tb.reshape(-1)
 
     # ---- public deck composition ----------------------------------------
-    seen: List[int] = []
-    seen += board[0]
-    seen += board[1]
-    seen += board[2]
-    for i, p in enumerate(players):
-        seen += p.cards
-        if i == seat:
-            seen += p.reserved
-        else:
-            pub = p.reserved_public
-            for s, cid in enumerate(p.reserved):
-                if pub[s]:
-                    seen.append(cid)
-    counts = np.bincount(_DECK_GROUP[np.array(seen)], minlength=45)
-    out[DECK_OFF:DECK_OFF + 45] = (_GROUP_TOTALS - counts) * 0.125
+    tableaus: List[int] = []
+    _tableau_cards(state, tableaus)
+    counts = (np.bincount(_DECK_GROUP_EXT[idx], minlength=46)
+              + np.bincount(_DECK_GROUP[np.array(tableaus, dtype=np.intp)],
+                            minlength=46))
+    out[DECK_OFF:DECK_OFF + 45] = (_GROUP_TOTALS - counts[:45]) * 0.125
     dc = state.deck_counts
     out[DECK_OFF + 45:GLOBAL_OFF] = [dc[0] / 36.0, dc[1] / 26.0, dc[2] / 16.0]
 
@@ -439,13 +455,11 @@ def encode(state: GameState, seat: int,
                          default=0)
         other_progress = min(best_other / _THRESHOLD_INDIVIDUAL, 1.0)
     else:
-        other = 1 - (my_team if my_team is not None else 0)
-        other_total = 0.0
-        other_thr = _THRESHOLD_TEAM
+        other_team = 1 - (my_team if my_team is not None else 0)
+        other_total, other_thr = 0.0, _THRESHOLD_TEAM
         for i in range(n):
-            if players[i].team_id == other:
-                other_total = totals[i]
-                other_thr = thresholds[i]
+            if players[i].team_id == other_team:
+                other_total, other_thr = totals[i], thresholds[i]
                 break
         other_progress = min(other_total / other_thr, 1.0)
     out[GLOBAL_OFF:OBS_DIM] = [
@@ -461,7 +475,7 @@ def encode(state: GameState, seat: int,
         1.0 if frt is not None else 0.0,
         1.0 if frt_off == 0 else 0.0, 1.0 if frt_off == 1 else 0.0,
         1.0 if frt_off == 2 else 0.0, 1.0 if frt_off == 3 else 0.0,
-        (min(_plies_to_round_leader(state) / 4.0, 1.0)
+        (min(_plies_to_round_leader(state) * 0.25, 1.0)
          if state.phase == PHASE_PLAYING else 0.0),
         1.0 if (mode == MODE_TEAM and frt is not None) else 0.0,
         my_progress,
@@ -475,13 +489,17 @@ def encode(state: GameState, seat: int,
     return out
 
 
+# ── batch encoder ─────────────────────────────────────────────────────────
+
 def encode_batch(states: Sequence[GameState], seats: Sequence[int],
                  out: Optional[np.ndarray] = None) -> np.ndarray:
-    """Encode a batch of ``(state, seat)`` pairs into a ``(B, OBS_DIM)`` array.
+    """Encode ``(state, seat)`` pairs into a ``(B, OBS_DIM)`` ``float32`` array.
 
-    ``out`` is filled in place when given (it must be C-contiguous ``float32``
-    of the right shape) — the inference server and the learner keep one pinned
-    buffer per batch slot and never allocate in the hot loop.
+    This is the hot path of the inference server and of the learner (which
+    re-encodes stored positions on the fly), so the per-state Python work is
+    reduced to gathering flat lists of ids and counters and every feature is
+    then computed once for the whole batch.  ``encode(state, seat)`` is
+    exercised against this on random positions by ``tests/test_encode.py``.
     """
     b = len(states)
     if b != len(seats):
@@ -490,8 +508,197 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
         out = np.zeros((b, OBS_DIM), dtype=np.float32)
     elif out.shape != (b, OBS_DIM):
         raise ValueError(f"out has shape {out.shape}, expected {(b, OBS_DIM)}")
+    if b < _BATCH_MIN:
+        for i in range(b):
+            encode(states[i], seats[i], out[i])
+        return out
+
+    # ``array('h')`` buffers instead of Python lists: extending them costs
+    # about a third of a list append per element and ``np.frombuffer`` then
+    # wraps the result without converting anything.
+    card_ids = array("h")
+    tile_ids = array("h")
+    pvec = array("h")               # per seat: gems[6] + discount[5]
+    pscal = array("h")              # per seat: score, cards, reserved, tiles,
+    #                                 resigned, team_id + 1 (0 = none)
+    gvec = array("h")               # 19 per state, see the unpacking below
+    tableaus = array("h")
+    tableau_len = []
+
     for i in range(b):
-        encode(states[i], seats[i], out[i])
+        state = states[i]
+        seat = seats[i]
+        n = state.num_players
+        players = state.players
+        cfg = state.config
+        resigned = state.resigned
+        _card_slot_ids(state, seat, card_ids)
+        tiles = state.tiles
+        m = len(tiles) if len(tiles) < MAX_TILE_CHOICES else MAX_TILE_CHOICES
+        tile_ids.extend(tiles[:m])
+        tile_ids.extend(_PAD_TILE[MAX_TILE_CHOICES - m])
+        for j in range(MAX_SEATS):
+            if j >= n:
+                pvec.extend(_ZERO_PVEC)
+                pscal.extend(_ZERO_PSCAL)
+                continue
+            who = (seat + j) % n
+            p = players[who]
+            pvec.extend(p.gems)
+            pvec.extend(p.discount)
+            pscal.extend((p.score, len(p.cards), len(p.reserved), len(p.tiles),
+                          1 if who in resigned else 0,
+                          0 if p.team_id is None else p.team_id + 1))
+        before = len(tableaus)
+        _tableau_cards(state, tableaus)
+        tableau_len.append(len(tableaus) - before)
+        frt = state.final_round_triggered_by
+        dc = state.deck_counts
+        sg = state.gems
+        gvec.extend((n, _MODE_INDEX[state.mode],
+                     _LAYOUT_INDEX[state.team_layout],
+                     cfg["tokensPerColor"], cfg["wildTokens"],
+                     state.turn_number,
+                     -1 if frt is None else (frt - seat) % n,
+                     (_plies_to_round_leader(state)
+                      if state.phase == PHASE_PLAYING else 0),
+                     1 if (state.pending_tile_choice
+                           and state.current_player == seat) else 0,
+                     seat, dc[0], dc[1], dc[2],
+                     sg[0], sg[1], sg[2], sg[3], sg[4], sg[5]))
+
+    rows = np.arange(b)
+    cid = np.frombuffer(card_ids, dtype=np.int16).reshape(b, _CARD_SLOTS)
+    pv = np.frombuffer(pvec, dtype=np.int16).reshape(
+        b, MAX_SEATS, 11).astype(np.float32)
+    ps = np.frombuffer(pscal, dtype=np.int16).reshape(
+        b, MAX_SEATS, 6).astype(np.float32)
+    gv = np.frombuffer(gvec, dtype=np.int16).reshape(b, 19).astype(np.float32)
+    n_players = gv[:, 0]
+    mode = gv[:, 1]
+    tpc = gv[:, 3, None]
+    wild = gv[:, 4, None]
+    my_gems = pv[:, 0, 0:6]
+    my_disc = pv[:, 0, 6:11]
+    present = np.arange(MAX_SEATS)[None, :] < n_players[:, None]     # (b, 4)
+
+    # ---- card slots ------------------------------------------------------
+    blk = _CARD_STATIC[cid]                                  # (b, 24, 25)
+    short = _CARD_COST_EXT[cid] - (my_disc + my_gems[:, 0:5])[:, None, :]
+    np.maximum(short, 0.0, out=short)
+    total_short = short.sum(2)
+    max_short = short.max(2)
+    real = cid < EMPTY_CARD
+    short *= 1.0 / 7.0
+    blk[:, :, 14:19] = short
+    blk[:, :, 19] = np.minimum(total_short * 0.2, 1.0)
+    blk[:, :, 20] = np.less_equal(total_short, my_gems[:, 5, None]) & real
+    blk[:, :, 21] = np.minimum(
+        np.maximum(np.ceil(total_short * (1.0 / 3.0)), max_short) * (1.0 / 6.0),
+        1.0)
+    blk[:, _OTHER_SLOT0:, 23] = real[:, _OTHER_SLOT0:]
+    out[:, BOARD_OFF:OWN_RESERVED_OFF] = \
+        blk[:, :_OWN_SLOT0, :CARD_FEATURES].reshape(b, -1)
+    out[:, OWN_RESERVED_OFF:OTHER_RESERVED_OFF] = \
+        blk[:, _OWN_SLOT0:_OTHER_SLOT0, :CARD_FEATURES].reshape(b, -1)
+    out[:, OTHER_RESERVED_OFF:PLAYER_OFF] = blk[:, _OTHER_SLOT0:].reshape(b, -1)
+
+    # ---- player blocks ---------------------------------------------------
+    pb = np.zeros((b, MAX_SEATS, PLAYER_FEATURES), dtype=np.float32)
+    pb[:, :, 0:5] = pv[:, :, 0:5] / tpc[:, :, None]
+    pb[:, :, 5] = pv[:, :, 5] / wild
+    pb[:, :, 6:11] = np.minimum(pv[:, :, 6:11] * (1.0 / 7.0), 1.0)
+    score = ps[:, :, 0]
+    pb[:, :, 11] = np.minimum(score * (1.0 / 15.0), 1.0)
+    pb[:, :, 12] = np.minimum(ps[:, :, 1] * 0.05, 1.0)
+    pb[:, :, 13] = ps[:, :, 2] * (1.0 / 3.0)
+    pb[:, :, 14] = np.minimum(ps[:, :, 3] * (1.0 / 3.0), 1.0)
+    pb[:, :, 15] = ps[:, :, 4]
+    pb[:, :, 16] = 1.0
+    pb[:, 0, 17] = 1.0
+    team = ps[:, :, 5]                             # 0 = none, 1 = t0, 2 = t1
+    my_team = team[:, 0:1]
+    mate = (team == my_team) & (my_team > 0)
+    mate[:, 0] = False
+    pb[:, :, 18] = mate
+    is_ovt = mode[:, None] == 2
+    pb[:, :, 19] = (team == 1) & is_ovt
+    for _j in range(MAX_SEATS):
+        pb[:, _j, 20 + _j] = 1.0
+    total0 = (score * (team == 1)).sum(1)[:, None]
+    total1 = (score * (team == 2)).sum(1)[:, None]
+    is_ind = mode[:, None] == 0
+    side_total = np.where(is_ind, score,
+                          np.where(team == 1, total0,
+                                   np.where(team == 2, total1, 0.0)))
+    side_thr = np.where(is_ind, _THRESHOLD_INDIVIDUAL,
+                        np.where(is_ovt,
+                                 np.where(team == 1, _THRESHOLD_SOLO,
+                                          _THRESHOLD_DUO),
+                                 _THRESHOLD_TEAM))
+    pb[:, :, 24] = np.clip((side_total - side_thr) * (1.0 / 15.0), -1.0, 1.0)
+    pb *= present[:, :, None]
+    out[:, PLAYER_OFF:TILE_OFF] = pb.reshape(b, -1)
+
+    # ---- noble tiles -----------------------------------------------------
+    tid = np.frombuffer(tile_ids, dtype=np.int16).reshape(b, MAX_TILE_CHOICES)
+    req = _TILE_REQ_EXT[tid]                                 # (b, 5, 5)
+    tb = np.zeros((b, MAX_TILE_CHOICES, TILE_FEATURES), dtype=np.float32)
+    tb[:, :, 0:5] = req * 0.25
+    mine = np.maximum(req - my_disc[:, None, :], 0.0)
+    mine_total = mine.sum(2)
+    tb[:, :, 5:10] = mine * 0.25
+    tb[:, :, 10] = mine_total * (1.0 / 12.0)
+    tb[:, :, 11] = 1.0
+    tb[:, :, 12] = mine_total == 0.0
+    gap = np.maximum(req[:, None, :, :] - pv[:, 1:MAX_SEATS, None, 6:11], 0.0)
+    tb[:, :, 13:16] = (gap.sum(3) * (1.0 / 12.0)).transpose(0, 2, 1) \
+        * present[:, None, 1:MAX_SEATS]
+    tb *= (tid < EMPTY_TILE)[:, :, None]
+    out[:, TILE_OFF:DECK_OFF] = tb.reshape(b, -1)
+
+    # ---- public deck composition ----------------------------------------
+    offsets = rows * 46
+    slot_groups = _DECK_GROUP_EXT[cid] + offsets[:, None]
+    tab_groups = (_DECK_GROUP[np.frombuffer(tableaus, dtype=np.int16)]
+                  + np.repeat(offsets, tableau_len))
+    counts = (np.bincount(slot_groups.reshape(-1), minlength=b * 46)
+              + np.bincount(tab_groups, minlength=b * 46)).reshape(b, 46)
+    out[:, DECK_OFF:DECK_OFF + 45] = (_GROUP_TOTALS - counts[:, :45]) * 0.125
+    out[:, DECK_OFF + 45:GLOBAL_OFF] = gv[:, 10:13] * _DECK_SCALE
+
+    # ---- global ----------------------------------------------------------
+    gb = np.zeros((b, GLOBAL_FEATURES), dtype=np.float32)
+    gb[:, 0:5] = gv[:, 13:18] / tpc
+    gb[:, 5] = gv[:, 18] / gv[:, 4]
+    gb[rows, 6 + mode.astype(np.intp)] = 1.0
+    layout = gv[:, 2].astype(np.intp)
+    has_layout = layout > 0
+    gb[rows[has_layout], 8 + layout[has_layout]] = 1.0
+    gb[rows, 9 + n_players.astype(np.intp)] = 1.0
+    gb[:, 14] = np.minimum(gv[:, 5] * 0.01, 1.0)
+    frt = gv[:, 6]
+    in_final = frt >= 0.0
+    gb[:, 15] = in_final
+    frt_i = frt.astype(np.intp)
+    gb[rows[in_final], 16 + frt_i[in_final]] = 1.0
+    gb[:, 20] = np.minimum(gv[:, 7] * 0.25, 1.0)
+    gb[:, 21] = in_final & (mode == 1)
+    my_total = side_total[:, 0]
+    my_thr = side_thr[:, 0]
+    gb[:, 22] = np.minimum(my_total / my_thr, 1.0)
+    other_score = (score[:, 1:MAX_SEATS] * present[:, 1:MAX_SEATS]).max(1)
+    other_total = np.where(my_team[:, 0] == 1, total1[:, 0], total0[:, 0])
+    other_thr = np.where(is_ovt[:, 0],
+                         np.where(my_team[:, 0] == 1, _THRESHOLD_DUO,
+                                  _THRESHOLD_SOLO),
+                         _THRESHOLD_TEAM)
+    gb[:, 23] = np.where(is_ind[:, 0],
+                         np.minimum(other_score * (1.0 / 15.0), 1.0),
+                         np.minimum(other_total / other_thr, 1.0))
+    gb[:, 24] = gv[:, 8]
+    gb[rows, 25 + gv[:, 9].astype(np.intp)] = 1.0
+    out[:, GLOBAL_OFF:OBS_DIM] = gb
     return out
 
 
@@ -500,4 +707,5 @@ __all__ = ["OBS_VERSION", "OBS_DIM", "encode", "encode_batch",
            "PLAYER_FEATURES", "TILE_FEATURES", "DECK_FEATURES",
            "GLOBAL_FEATURES", "BOARD_OFF", "OWN_RESERVED_OFF",
            "OTHER_RESERVED_OFF", "PLAYER_OFF", "TILE_OFF", "DECK_OFF",
-           "GLOBAL_OFF", "MAX_SEATS"]
+           "GLOBAL_OFF", "MAX_SEATS", "EMPTY_CARD", "HIDDEN_CARD0",
+           "EMPTY_TILE"]
