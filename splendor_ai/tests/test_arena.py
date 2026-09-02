@@ -462,6 +462,16 @@ def test_cli_rejects_duplicate_bot_names(tmp_path):
                     "--games", "1", "--out", str(tmp_path / "x.md")])
 
 
+def test_missing_anchor_falls_back_loudly(tiny_results):
+    """A report headed "anchor X = 0" that was centred on something else is
+    exactly the incomparable number this module exists to prevent."""
+    with pytest.warns(RuntimeWarning, match="did not play"):
+        report = arena.build_report(tiny_results, anchor="not_here",
+                                    bootstrap=0)
+    assert report["anchor"] == "random"                # the first bot
+    assert report["ratings"]["ratings"]["random"]["elo"] == 0.0
+
+
 def test_report_renders_without_bootstrap(tiny_results):
     report = arena.build_report(tiny_results, bootstrap=0)
     text = render_markdown(report)

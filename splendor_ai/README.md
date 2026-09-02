@@ -480,6 +480,12 @@ costs: `random`/`greedy` ≈ 5 ms/game, `mcts40` ≈ 0.7 s, `mcts160` ≈ 3 s,
 | `random` |   0 |   0 …    0 |   102 | 16.2% |
 ```
 
+Read the *ordering* first, then the gaps. In this excerpt (a 135-game smoke
+run) `mcts40` sits **below** `greedy` — 40 simulations of a rollout-value
+search really is worse than the 1-ply heuristic. The ladder is monotone in
+`sims`, not against `greedy`: a 2p spot check measured `mcts640` +580,
+`mcts160` +110, `greedy` 0, `mcts40` −113 Elo.
+
 * **One joint fit, not a chain.** Every game constrains every rating through a
   single Bradley–Terry likelihood (Zermelo/MM iteration), so a bot that never
   met `random` is still placed on the same scale through the anchors it did
