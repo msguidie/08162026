@@ -620,7 +620,7 @@ function getQualifyingTeamIds(state) {
   if (stats.length !== 2) return [];
   if (state.gameMode === 'ONE_V_TWO') {
     return stats
-      .filter(team => team.teamId === 0 ? team.total >= 15 : team.total >= 34)
+      .filter(team => team.teamId === 0 ? team.total >= 15 : team.total >= 33)
       .map(team => team.teamId);
   }
   return stats
@@ -645,13 +645,13 @@ function resolveOneVsTwoWinners(state) {
   if (!solo || !duo) return [];
 
   const soloQualified = solo.total >= 15;
-  const duoQualified = duo.total >= 34;
+  const duoQualified = duo.total >= 33;
   if (soloQualified && !duoQualified) return [0];
   if (duoQualified && !soloQualified) return [1];
   if (!soloQualified && !duoQualified) return [];
 
   const soloExcess = solo.total - 15;
-  const duoExcess = duo.total - 34;
+  const duoExcess = duo.total - 33;
   if (soloExcess === duoExcess) return [0, 1];
   return [soloExcess > duoExcess ? 0 : 1];
 }
