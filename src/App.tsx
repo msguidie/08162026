@@ -4,6 +4,8 @@ import useGameStore from './store/gameStore';
 import LoginScreen from './components/LoginScreen';
 import WaitingRoom from './components/WaitingRoom';
 import GameBoard from './components/GameBoard';
+import ReplayBrowser from './replay/ReplayBrowser';
+import ReplayViewer from './replay/ReplayViewer';
 
 export default function App() {
   const { appPhase, connectionStatus, reconnectAttempts, toasts, removeToast } = useGameStore();
@@ -50,6 +52,8 @@ export default function App() {
       {appPhase === 'LOGIN' && <LoginScreen />}
       {appPhase === 'WAITING_ROOM' && <WaitingRoom />}
       {appPhase === 'GAME' && <GameBoard />}
+      {appPhase === 'REPLAY_BROWSER' && <ReplayBrowser />}
+      {appPhase === 'REPLAY_VIEWER' && <ReplayViewer />}
     </div>
   );
 }

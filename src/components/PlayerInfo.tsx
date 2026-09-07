@@ -4,6 +4,7 @@ import type { Player, GameState, ActionMode, GameMode } from '../types';
 import { GEM_COLORS_HEX, GEM_COLORS_LIGHT, GEM_NAMES, GOLD_HEX } from '../types';
 import { getRewardCounts } from '../utils/gameHelpers';
 import Avatar from './Avatar';
+import BotBadge from './BotBadge';
 import CardView from './CardView';
 
 interface PlayerInfoProps {
@@ -14,6 +15,8 @@ interface PlayerInfoProps {
   compact?: boolean;
   isPulsing?: boolean;
   isDisconnected?: boolean;
+  /** Seat is played by an AI bot (docs/AI_BRIDGE.md §3). */
+  isAI?: boolean;
   clockLabel?: string;
   clockUrgent?: boolean;
   gameMode?: GameMode;
@@ -46,7 +49,7 @@ function MiniCardTile({ color, size = 'md' }: { color: number; size?: 'xs' | 'sm
 
 export default function PlayerInfo({
   player, isMe, isCurrentTurn, mobile = false, compact = false, isPulsing = false,
-  isDisconnected = false, clockLabel, clockUrgent = false, gameMode = 'INDIVIDUAL', cardDeltas = {},
+  isDisconnected = false, isAI = false, clockLabel, clockUrgent = false, gameMode = 'INDIVIDUAL', cardDeltas = {},
   actionMode, gameState, playerIndex, onSetActionMode, onClickCard,
   onConfirmGems, canConfirmGems = false, isConfirmingGems = false,
 }: PlayerInfoProps) {
@@ -75,6 +78,7 @@ export default function PlayerInfo({
               <div className={`min-w-0 flex-1 text-[8px] font-medium break-all leading-[9px] ${isDisconnected ? 'text-slate-400' : 'text-slate-700'}`}>
                 {player.username}
               </div>
+              {isAI && <BotBadge iconOnly />}
               {player.teamId !== undefined && <TeamBadge teamId={player.teamId} gameMode={gameMode} mobile />}
             </div>
             <div className="mt-0.5 flex items-center justify-between gap-0.5 font-display leading-none whitespace-nowrap">
@@ -100,6 +104,7 @@ export default function PlayerInfo({
                 <div className={`text-xs font-medium truncate leading-tight ${isDisconnected ? 'text-slate-400' : 'text-slate-700'}`}>
                   {player.username}
                 </div>
+                {isAI && <BotBadge />}
                 {player.teamId !== undefined && <TeamBadge teamId={player.teamId} gameMode={gameMode} />}
               </div>
             </div>
@@ -201,6 +206,7 @@ export default function PlayerInfo({
             <div className="min-w-0">
               <div className="flex items-center gap-1 min-w-0">
                 <span className="text-[10px] font-medium break-all leading-tight text-slate-700">{player.username}</span>
+                {isAI && <BotBadge iconOnly />}
                 {player.teamId !== undefined && <TeamBadge teamId={player.teamId} gameMode={gameMode} mobile />}
               </div>
               <div className="flex items-center gap-1.5 text-[9px] font-display whitespace-nowrap">
@@ -310,6 +316,7 @@ export default function PlayerInfo({
           <Avatar seed={player.avatarSeed} size={40} highlight={isCurrentTurn} />
           <div className="flex items-center gap-1 mt-0.5 max-w-[90px]">
             <div className="text-xs font-medium truncate text-slate-700">{player.username}</div>
+            {isAI && <BotBadge />}
             {player.teamId !== undefined && <TeamBadge teamId={player.teamId} gameMode={gameMode} />}
           </div>
           <div className="text-sm font-display">

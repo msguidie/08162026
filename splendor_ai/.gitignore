@@ -1,0 +1,5 @@
+# Generated validation trajectories (tens of MB) — reproduce with
+# `cd validation && make all`.
+validation/data/
+*.jsonl
+*.jsonl.gz

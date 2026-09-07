@@ -1,0 +1,6 @@
+{
+  "name": "splendor-ai-validation",
+  "private": true,
+  "type": "commonjs",
+  "description": "CommonJS scope for the cross-language validation generator (the repo root package.json sets type=module)."
+}

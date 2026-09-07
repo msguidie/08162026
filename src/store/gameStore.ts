@@ -4,8 +4,10 @@ import type {
   AppPhase, ConnectionStatus, GameState, LobbyPlayer,
   Account, ActionMode, ActionResult, BonusTile, LobbyState,
   LobbyTeamFormat, TeamId, TeamLayout, TeamSeats,
+  ReplayData, ReplayIndexEntry,
 } from '../types';
 import { SERVER_URL, CONNECTION_CONFIG } from '../constants';
+import { fetchReplay, fetchReplayList } from '../replay/replayApi';
 
 export interface Toast {
   id: string;
@@ -27,7 +29,11 @@ interface GameStore {
   lobbyTeamLayout: TeamLayout;
   lobbyTeamSeats: TeamSeats;
   lobbyUnlimitedTime: boolean;
+  /** AI is enabled on this server and a worker is connected (docs/AI_BRIDGE.md §3). */
+  lobbyAiAvailable: boolean;
   gameState: GameState | null;
+  /** Seat indices played by AI bots in the current game (docs/AI_BRIDGE.md §3). */
+  aiSeats: number[];
   actionMode: ActionMode;
   pendingTileChoice: number[] | null; // tile IDs to choose from
 
@@ -35,6 +41,14 @@ interface GameStore {
   reconnectAttempts: number;
   disconnectedPlayers: Set<string>;
   toasts: Toast[];
+
+  // ── Replays (additive; see docs/REPLAY_FORMAT.md) ──
+  replayList: ReplayIndexEntry[];
+  replayListLoading: boolean;
+  replayListError: string | null;
+  currentReplay: ReplayData | null;
+  replayLoading: boolean;
+  replayError: string | null;
 
   connectToServer: () => Promise<void>;
   login: (username: string) => Promise<boolean>;
@@ -46,6 +60,9 @@ interface GameStore {
   toggleTeamLayout: () => void;
   toggleUnlimitedTime: () => void;
   selectTeamSeat: (teamId: TeamId, seatIndex: 0 | 1) => void;
+  selectTeamSeatFor: (teamId: TeamId, seatIndex: 0 | 1, username: string) => void;
+  addAI: () => void;
+  removeAI: (username: string) => void;
   setActionMode: (mode: ActionMode) => void;
   sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => void;
   chooseBonusTile: (tileId: number) => void;
@@ -55,6 +72,12 @@ interface GameStore {
   disconnect: () => void;
   addToast: (message: string, type?: Toast['type']) => void;
   removeToast: (id: string) => void;
+
+  openReplayBrowser: () => void;
+  refreshReplayList: () => Promise<void>;
+  openReplay: (id: string) => Promise<void>;
+  closeReplayViewer: () => void;
+  closeReplayBrowser: () => void;
 }
 
 interface LobbyResponse {
@@ -67,6 +90,18 @@ const EMPTY_TEAM_SEATS: TeamSeats = [[null, null], [null, null]];
 
 const useGameStore = create<GameStore>((set, get) => {
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  // Fallback timer for enterLobby(), cleared as soon as the server answers so a
+  // stale timeout cannot yank the user out of whatever screen they moved on to.
+  let enterLobbyTimer: ReturnType<typeof setTimeout> | null = null;
+  // Tokens so a slow replay response cannot overwrite a newer one.
+  let replayListRequest = 0;
+  let replayRequest = 0;
+
+  function clearEnterLobbyTimer() {
+    if (enterLobbyTimer === null) return;
+    clearTimeout(enterLobbyTimer);
+    enterLobbyTimer = null;
+  }
 
   function applyLobbyState(lobbyState?: LobbyState) {
     if (!lobbyState) return;
@@ -77,10 +112,12 @@ const useGameStore = create<GameStore>((set, get) => {
       lobbyTeamLayout: lobbyState.teamLayout,
       lobbyTeamSeats: lobbyState.teamSeats,
       lobbyUnlimitedTime: lobbyState.unlimitedTime,
+      lobbyAiAvailable: lobbyState.aiAvailable === true,
     });
   }
 
   function handleLobbyResponse(result: LobbyResponse) {
+    clearEnterLobbyTimer();
     if (result?.action === 'rejoin_game') return;
     if (result?.action === 'lobby_full' || result?.action === 'error') {
       showToast(result.error || 'Unable to enter the lobby', 'warn');
@@ -107,6 +144,8 @@ const useGameStore = create<GameStore>((set, get) => {
       playerIndex: number;
       gameState: GameState;
       isReconnect?: boolean;
+      /** Absent on servers that predate the AI bridge. */
+      aiSeats?: number[];
     }) => {
       const restoredActionMode: ActionMode =
         data.gameState.currentPlayerIndex === data.playerIndex && data.gameState.turnAction?.type === 'RESERVE'
@@ -119,6 +158,7 @@ const useGameStore = create<GameStore>((set, get) => {
         roomId: data.roomId,
         playerIndex: data.playerIndex,
         gameState: data.gameState,
+        aiSeats: Array.isArray(data.aiSeats) ? data.aiSeats : [],
         actionMode: restoredActionMode,
         pendingTileChoice: null,
         disconnectedPlayers: new Set(),
@@ -248,6 +288,7 @@ const useGameStore = create<GameStore>((set, get) => {
     playerIndex: -1,
     lobbyPlayers: [],
     gameState: null,
+    aiSeats: [],
     actionMode: null,
     pendingTileChoice: null,
     lastActionResult: null,
@@ -259,6 +300,13 @@ const useGameStore = create<GameStore>((set, get) => {
     lobbyTeamLayout: 'ADJACENT',
     lobbyTeamSeats: EMPTY_TEAM_SEATS,
     lobbyUnlimitedTime: false,
+    lobbyAiAvailable: false,
+    replayList: [],
+    replayListLoading: false,
+    replayListError: null,
+    currentReplay: null,
+    replayLoading: false,
+    replayError: null,
 
     connectToServer: async () => {
       const existingSocket = get().socket;
@@ -279,6 +327,12 @@ const useGameStore = create<GameStore>((set, get) => {
           clearTimeout(connectTimeout);
           set({ socket, connectionStatus: 'connected' });
           setupSocket(socket);
+          // This socket is brand new, so the server has no session for it yet.
+          // Re-send the login we already hold so a later `enter_lobby` (e.g.
+          // after Leave Lobby → Enter Lobby) is not rejected with
+          // "Login required". Re-logging in is idempotent server-side.
+          const account = get().myAccount;
+          if (account) socket.emit('login', { username: account.username }, () => {});
           heartbeatInterval = setInterval(() => socket.emit('ping'), CONNECTION_CONFIG.HEARTBEAT_INTERVAL);
           resolve();
         });
@@ -304,21 +358,26 @@ const useGameStore = create<GameStore>((set, get) => {
       const { socket } = get();
       if (!socket) return;
       set({ connectionStatus: 'entering_lobby' });
-      socket.emit('enter_lobby', (result: LobbyResponse) => {
-        handleLobbyResponse(result);
-      });
-      setTimeout(() => {
-        if (get().connectionStatus === 'entering_lobby') {
+      clearEnterLobbyTimer();
+      enterLobbyTimer = setTimeout(() => {
+        enterLobbyTimer = null;
+        // Only rescue a user who is still sitting on the login screen waiting for
+        // the lobby — never drag them out of the replay browser or a game.
+        if (get().connectionStatus === 'entering_lobby' && get().appPhase === 'LOGIN') {
           set({ appPhase: 'WAITING_ROOM', connectionStatus: 'in_lobby' });
         }
       }, 3000);
+      // The ack clears the timer (handleLobbyResponse), so arm it first.
+      socket.emit('enter_lobby', (result: LobbyResponse) => {
+        handleLobbyResponse(result);
+      });
     },
 
     leaveLobby: () => {
       get().socket?.emit('leave_lobby');
       set({
         appPhase: 'LOGIN', lobbyPlayers: [], lobbyTeamMode: false, lobbyTeamFormat: null,
-        lobbyUnlimitedTime: false,
+        lobbyUnlimitedTime: false, lobbyAiAvailable: false,
         lobbyTeamLayout: 'ADJACENT', lobbyTeamSeats: EMPTY_TEAM_SEATS,
       });
     },
@@ -365,6 +424,32 @@ const useGameStore = create<GameStore>((set, get) => {
       const { socket } = get();
       if (!socket) return;
       socket.emit('select_team_seat', { teamId, seatIndex }, (res: { error?: string }) => {
+        if (res?.error) showToast(res.error, 'warn');
+      });
+    },
+
+    // ── AI bots (docs/AI_BRIDGE.md §3) ──
+    // Bots cannot click a seat themselves, so any lobby member seats them.
+    selectTeamSeatFor: (teamId, seatIndex, username) => {
+      const { socket } = get();
+      if (!socket) return;
+      socket.emit('select_team_seat', { teamId, seatIndex, forUsername: username }, (res: { error?: string }) => {
+        if (res?.error) showToast(res.error, 'warn');
+      });
+    },
+
+    addAI: () => {
+      const { socket } = get();
+      if (!socket) return;
+      socket.emit('lobby_add_ai', {}, (res: { error?: string; username?: string }) => {
+        if (res?.error) showToast(res.error, 'warn');
+      });
+    },
+
+    removeAI: (username: string) => {
+      const { socket } = get();
+      if (!socket) return;
+      socket.emit('lobby_remove_ai', { username }, (res: { error?: string }) => {
         if (res?.error) showToast(res.error, 'warn');
       });
     },
@@ -468,6 +553,53 @@ const useGameStore = create<GameStore>((set, get) => {
 
     addToast: (message, type = 'info') => showToast(message, type),
     removeToast: (id) => set(s => ({ toasts: s.toasts.filter(t => t.id !== id) })),
+
+    // ── Replays: read-only REST, independent of the socket session ──
+    openReplayBrowser: () => {
+      set({ appPhase: 'REPLAY_BROWSER' });
+      void get().refreshReplayList();
+    },
+
+    refreshReplayList: async () => {
+      const token = ++replayListRequest;
+      set({ replayListLoading: true, replayListError: null });
+      try {
+        const { games } = await fetchReplayList();
+        if (token !== replayListRequest) return;
+        set({ replayList: games, replayListLoading: false });
+      } catch (err) {
+        if (token !== replayListRequest) return;
+        set({
+          replayListLoading: false,
+          replayListError: err instanceof Error ? err.message : 'Failed to load replays',
+        });
+      }
+    },
+
+    openReplay: async (id: string) => {
+      const token = ++replayRequest;
+      set({ appPhase: 'REPLAY_VIEWER', currentReplay: null, replayLoading: true, replayError: null });
+      try {
+        const replay = await fetchReplay(id);
+        if (token !== replayRequest || get().appPhase !== 'REPLAY_VIEWER') return;
+        set({ currentReplay: replay, replayLoading: false });
+      } catch (err) {
+        if (token !== replayRequest) return;
+        set({
+          replayLoading: false,
+          replayError: err instanceof Error ? err.message : 'Failed to load this replay',
+        });
+      }
+    },
+
+    closeReplayViewer: () => {
+      replayRequest++;
+      set({ appPhase: 'REPLAY_BROWSER', currentReplay: null, replayLoading: false, replayError: null });
+    },
+
+    closeReplayBrowser: () => {
+      set({ appPhase: 'LOGIN' });
+    },
   };
 });
 

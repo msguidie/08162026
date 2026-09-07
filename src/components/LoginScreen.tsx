@@ -5,7 +5,7 @@ import Avatar from './Avatar';
 import type { Account } from '../types';
 
 export default function LoginScreen() {
-  const { connectionStatus, myAccount, connectToServer, login, enterLobby } = useGameStore();
+  const { connectionStatus, myAccount, connectToServer, login, enterLobby, openReplayBrowser } = useGameStore();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [view, setView] = useState<'main' | 'create' | 'login'>('main');
   const [newName, setNewName] = useState('');
@@ -106,6 +106,9 @@ export default function LoginScreen() {
           <button onClick={enterLobby} className="w-full py-3 bg-[#7EA68A] hover:bg-[#6B9477] text-white rounded-xl font-semibold transition shadow-sm">
             Enter Lobby
           </button>
+          <button onClick={openReplayBrowser} className="w-full py-3 bg-[#8B9DAF] hover:bg-[#7A8D9F] text-white rounded-xl font-semibold transition shadow-sm">
+            Replays
+          </button>
         </div>
       </div>
     );
@@ -139,6 +142,9 @@ export default function LoginScreen() {
             </button>
             <button onClick={() => { setView('login'); fetchAccounts(); }} className="w-full py-3 bg-[#8B9DAF] hover:bg-[#7A8D9F] text-white rounded-xl font-semibold transition shadow-sm">
               Login
+            </button>
+            <button onClick={openReplayBrowser} className="w-full py-3 bg-[#8B9DAF] hover:bg-[#7A8D9F] text-white rounded-xl font-semibold transition shadow-sm">
+              Replays
             </button>
           </div>
         ) : view === 'create' ? (
