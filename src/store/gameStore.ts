@@ -64,6 +64,7 @@ interface GameStore {
   addAI: () => void;
   removeAI: (username: string) => void;
   setActionMode: (mode: ActionMode) => void;
+  cancelGemSelection: () => void;
   sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => void;
   chooseBonusTile: (tileId: number) => void;
   returnToLobby: () => void;
@@ -474,9 +475,9 @@ const useGameStore = create<GameStore>((set, get) => {
       }
 
       if (mode === null || mode === currentMode) {
-        // Cancel current mode
-        if (currentMode === 'TAKE_GEMS' && socket && roomId) {
-          socket.emit('game_action', { roomId, action: { type: 'CANCEL_GEMS' } });
+        if (currentMode === 'TAKE_GEMS' || gameState.turnAction?.type === 'TAKE_GEMS') {
+          get().cancelGemSelection();
+          return;
         }
         set({ actionMode: null });
         return;
@@ -493,6 +494,22 @@ const useGameStore = create<GameStore>((set, get) => {
       } else {
         set({ actionMode: mode });
       }
+    },
+
+    // Clearing a half-finished gem take. The server's turnAction is the source of
+    // truth: whatever the local mode says, a pending selection is always cleared,
+    // so the panel can never get stuck showing picked gems it cannot undo.
+    cancelGemSelection: () => {
+      const { gameState, playerIndex, socket, roomId } = get();
+      set({ actionMode: null });
+      if (!socket || !roomId || !gameState) return;
+      if (gameState.phase !== 'PLAYING' || gameState.currentPlayerIndex !== playerIndex) return;
+      if (gameState.turnAction?.type !== 'TAKE_GEMS') return;
+      socket.emit('game_action', { roomId, action: { type: 'CANCEL_GEMS' } }, (res: { error?: string }) => {
+        // A failure leaves the selection on the board, and the button keeps
+        // offering Cancel because it reads the server state, not this flag.
+        if (res?.error) showToast(res.error, 'warn');
+      });
     },
 
     sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => {
