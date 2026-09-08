@@ -119,6 +119,12 @@ export default function GameBoard() {
       setTimeout(() => setGemDeltas([]), 2200);
     }
 
+    // Backing out of reserve mode hands the gold back to the supply.
+    if (type === 'CANCEL_RESERVE' && payload.goldReturned) {
+      setGemDeltas([{ color: 5, delta: 1, key: `5-${Date.now()}` }]);
+      setTimeout(() => setGemDeltas([]), 2200);
+    }
+
     // Opponent card purchase +1 animation
     if (type === 'BUY_CARD' && actingPlayer !== playerIndex) {
       const reward = payload.reward as number;
@@ -238,6 +244,14 @@ export default function GameBoard() {
       totalHeldGems,
       gameState,
     ) ? [...current, color] : current);
+  };
+
+  // Clearing an incomplete selection: drop the local picks and leave the mode,
+  // which also tells the server to forget any committed prefix (CANCEL_GEMS).
+  const cancelGemSelection = () => {
+    if (submittingMobileGems) return;
+    setMobilePendingGems([]);
+    setActionMode(null);
   };
 
   const confirmMobileGemTake = () => {
@@ -511,6 +525,7 @@ export default function GameBoard() {
           clockLabel={playerClocks[playerIndex]?.label} clockUrgent={playerClocks[playerIndex]?.urgent}
           onSetActionMode={setActionMode}
           onConfirmGems={confirmMobileGemTake}
+          onCancelGems={cancelGemSelection}
           canConfirmGems={mobileGemSelectionComplete}
           isConfirmingGems={submittingMobileGems}
           onClickCard={(card, source) => {
