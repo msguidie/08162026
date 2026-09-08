@@ -12,7 +12,9 @@
 # `nscc_eval.pbs`).  It is safe to re-run: an existing environment is reused.
 #
 # What you get afterwards:
-#   * a conda environment named $ENV_NAME (default "splendor") with torch+CUDA
+#   * a conda environment with torch+CUDA -- on scratch ($HOME/scratch/conda-envs/
+#     $ENV_NAME) when a scratch filesystem exists, because $HOME's quota is far
+#     too small for the torch wheel; a named env $ENV_NAME otherwise
 #   * a green `pytest splendor_ai/tests -q`
 #   * optionally the Node cross-validation gate (docs/PLAN.md §4), if a Node
 #     module is available on the login node — it is skipped, not failed, if not
@@ -32,9 +34,34 @@ ENV_NAME="${ENV_NAME:-splendor}"          # override: ENV_NAME=foo bash ...
 PY_VERSION="${PY_VERSION:-3.11}"          # the version the code is tested on
 REQUIREMENTS="splendor_ai/requirements.txt"
 
+# --- where the environment lives --------------------------------------------
+# $HOME on NSCC has a small quota (a few GB) while the torch wheel alone
+# unpacks to ~3 GB.  A plain `conda create -n` therefore dies half-way with
+# "[Errno 122] Disk quota exceeded" — and, if it was a re-install, the old
+# torch is already gone, leaving a broken environment.  Scratch is ~1 TB, so
+# when a scratch filesystem exists put the environment AND every cache that
+# would otherwise land in $HOME (conda packages, pip cache, pip's build
+# directory) there.  Override any of them by exporting it before the run.
+SCRATCH="${SCRATCH:-${HOME}/scratch}"
+if [ -d "${SCRATCH}" ]; then
+    ENV_PREFIX="${ENV_PREFIX:-${SCRATCH}/conda-envs/${ENV_NAME}}"
+    export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-${SCRATCH}/conda-pkgs}"
+    export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${SCRATCH}/pip-cache}"
+    export TMPDIR="${TMPDIR:-${SCRATCH}/tmp}"
+    mkdir -p "${CONDA_PKGS_DIRS}" "${PIP_CACHE_DIR}" "${TMPDIR}" \
+             "$(dirname "${ENV_PREFIX}")"
+else
+    ENV_PREFIX="${ENV_PREFIX:-}"          # no scratch: fall back to $HOME
+fi
+
 echo "=== splendor_ai setup ======================================="
 echo "repo        : ${REPO_ROOT}"
-echo "environment : ${ENV_NAME} (python ${PY_VERSION})"
+if [ -n "${ENV_PREFIX}" ]; then
+    echo "environment : ${ENV_PREFIX} (python ${PY_VERSION})"
+    echo "caches      : ${CONDA_PKGS_DIRS}, ${PIP_CACHE_DIR}"
+else
+    echo "environment : ${ENV_NAME} (python ${PY_VERSION})"
+fi
 echo
 
 # --- 1. module system -------------------------------------------------------
@@ -71,13 +98,27 @@ CONDA_BASE="$(conda info --base)"
 . "${CONDA_BASE}/etc/profile.d/conda.sh"
 
 # --- 2. the environment -----------------------------------------------------
-if conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
-    echo "--- conda environment '${ENV_NAME}' already exists — reusing it"
+# With ENV_PREFIX the environment is a directory (`conda create -p`), which is
+# how it can live outside $HOME; `conda activate` takes that path directly, so
+# the PBS scripts need no change — pass them ENV_NAME=<that path>.
+if [ -n "${ENV_PREFIX}" ]; then
+    ENV_REF="${ENV_PREFIX}"
+    if [ -x "${ENV_PREFIX}/bin/python" ]; then
+        echo "--- environment at ${ENV_PREFIX} already exists — reusing it"
+    else
+        echo "--- creating environment at ${ENV_PREFIX}"
+        conda create -y -p "${ENV_PREFIX}" "python=${PY_VERSION}"
+    fi
 else
-    echo "--- creating conda environment '${ENV_NAME}'"
-    conda create -y -n "${ENV_NAME}" "python=${PY_VERSION}"
+    ENV_REF="${ENV_NAME}"
+    if conda env list | awk '{print $1}' | grep -qx "${ENV_NAME}"; then
+        echo "--- conda environment '${ENV_NAME}' already exists — reusing it"
+    else
+        echo "--- creating conda environment '${ENV_NAME}'"
+        conda create -y -n "${ENV_NAME}" "python=${PY_VERSION}"
+    fi
 fi
-conda activate "${ENV_NAME}"
+conda activate "${ENV_REF}"
 echo "python      : $(python -V 2>&1) at $(command -v python)"
 
 # --- 3. wheels --------------------------------------------------------------
@@ -166,18 +207,24 @@ fi
 cat <<EOF
 
 === setup complete ==========================================
-Environment '${ENV_NAME}' is ready.  Next steps:
+Environment '${ENV_REF}' is ready.
+
+  Activate it with:   conda activate ${ENV_REF}
+  Jobs need the same reference — pass it through as ENV_NAME:
+      -v ENV_NAME=${ENV_REF},...
+
+Next steps:
 
   1. First throughput job (gate G4) — a short run to measure sims/s:
-       qsub -l walltime=01:00:00 -v CHAIN=0,MAX_CHAIN=0 \\
+       qsub -l walltime=01:00:00 -v CHAIN=0,MAX_CHAIN=0,ENV_NAME=${ENV_REF} \\
             splendor_ai/scripts/nscc_train.pbs
 
   2. Chained training (each job resumes the previous one and re-submits
      itself until you 'touch STOP'):
-       qsub splendor_ai/scripts/nscc_train.pbs
+       qsub -v ENV_NAME=${ENV_REF} splendor_ai/scripts/nscc_train.pbs
 
   3. Evaluation of the latest checkpoint against the anchor ladder:
-       qsub splendor_ai/scripts/nscc_eval.pbs
+       qsub -v ENV_NAME=${ENV_REF} splendor_ai/scripts/nscc_eval.pbs
 
   Watch a job:      qstat -answ1 \$USER
   Stop the chain:   touch ${REPO_ROOT}/STOP
