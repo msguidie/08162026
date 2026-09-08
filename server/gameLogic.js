@@ -567,6 +567,24 @@ function processAction(state, playerIndex, action) {
       return { ok: true, result, completed: true };
     }
 
+    case 'CANCEL_RESERVE': {
+      // Back out of reserve mode before a card was picked: the gold taken on
+      // ENTER_RESERVE goes back to the supply and the turn is untouched, so the
+      // player can take gems or buy instead.
+      if (state.turnAction?.type !== 'RESERVE') return { error: 'Not in reserve mode' };
+      const goldReturned = state.turnAction.goldTaken === true;
+      if (goldReturned) {
+        player.gems[5]--;
+        state.gems[5]++;
+      }
+      state.turnAction = null;
+      return {
+        ok: true,
+        result: { type: 'CANCEL_RESERVE', actingPlayer: playerIndex, payload: { goldReturned } },
+        completed: false,
+      };
+    }
+
     case 'CANCEL_GEMS': {
       // Allow canceling gem selection (reset turn action)
       if (state.turnAction?.type === 'TAKE_GEMS') {

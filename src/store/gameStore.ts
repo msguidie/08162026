@@ -457,9 +457,15 @@ const useGameStore = create<GameStore>((set, get) => {
     setActionMode: (mode: ActionMode) => {
       const { gameState, playerIndex, actionMode: currentMode, socket, roomId } = get();
       if (!gameState || gameState.currentPlayerIndex !== playerIndex || gameState.phase !== 'PLAYING') return;
-      // Cannot cancel reserve mode (gold already taken)
+      // Reserve mode can be backed out of until a card is picked: the server
+      // returns the gold it handed out on ENTER_RESERVE and the turn is free again.
       if (currentMode === 'RESERVE' || gameState.turnAction?.type === 'RESERVE') {
-        set({ actionMode: 'RESERVE' });
+        if (!socket || !roomId) return;
+        const nextMode: ActionMode = mode === 'RESERVE' ? null : mode;
+        socket.emit('game_action', { roomId, action: { type: 'CANCEL_RESERVE' } }, (res: { error?: string }) => {
+          if (res?.error) { showToast(res.error, 'error'); set({ actionMode: 'RESERVE' }); return; }
+          set({ actionMode: nextMode });
+        });
         return;
       }
       if (gameState.turnAction?.type === 'TAKE_GEMS' && mode !== 'TAKE_GEMS' && mode !== null) {

@@ -29,6 +29,8 @@ interface PlayerInfoProps {
   onSetActionMode?: (mode: ActionMode) => void;
   onClickCard?: (card: { id: number; tier: number; reward: number; points: number; cost: number[] }, source: 'board' | 'reserved') => void;
   onConfirmGems?: () => void;
+  /** Clears an incomplete gem selection and leaves take-gems mode. */
+  onCancelGems?: () => void;
   canConfirmGems?: boolean;
   isConfirmingGems?: boolean;
 }
@@ -51,7 +53,7 @@ export default function PlayerInfo({
   player, isMe, isCurrentTurn, mobile = false, compact = false, isPulsing = false,
   isDisconnected = false, isAI = false, clockLabel, clockUrgent = false, gameMode = 'INDIVIDUAL', cardDeltas = {},
   actionMode, gameState, playerIndex, onSetActionMode, onClickCard,
-  onConfirmGems, canConfirmGems = false, isConfirmingGems = false,
+  onConfirmGems, onCancelGems, canConfirmGems = false, isConfirmingGems = false,
 }: PlayerInfoProps) {
   const rewards = getRewardCounts(player);
 
@@ -278,17 +280,23 @@ export default function PlayerInfo({
 
         {myTurn && onSetActionMode && !pendingTileChoice && (
           <div className="grid grid-cols-3 gap-1 mt-1 border-t border-white/60 pt-1">
+            {/* Until the selection is complete the button clears it instead of
+                being a dead "Confirm" the player cannot escape from. */}
             <ActionBtn mobile
               label={actionMode === 'TAKE_GEMS'
-                ? (isConfirmingGems ? 'Confirming…' : 'Confirm')
+                ? (isConfirmingGems ? 'Confirming…' : (canConfirmGems ? 'Confirm' : 'Cancel'))
                 : 'Take Gems'}
               active={actionMode === 'TAKE_GEMS'}
-              disabled={reserveLocked || (actionMode === 'TAKE_GEMS' && (!canConfirmGems || isConfirmingGems))}
-              onClick={() => actionMode === 'TAKE_GEMS'
-                ? onConfirmGems?.()
-                : onSetActionMode('TAKE_GEMS')} />
-            <ActionBtn mobile label="Reserve" active={reserveLocked}
-              disabled={reserveLocked || isConfirmingGems || player.reserved.length >= maxReserved}
+              disabled={reserveLocked || isConfirmingGems}
+              onClick={() => {
+                if (actionMode !== 'TAKE_GEMS') { onSetActionMode('TAKE_GEMS'); return; }
+                if (canConfirmGems) onConfirmGems?.();
+                else onCancelGems?.();
+              }} />
+            {/* Tapping Reserve again backs out: the server returns the gold. */}
+            <ActionBtn mobile label={reserveLocked ? 'Cancel' : 'Reserve'} active={reserveLocked}
+              disabled={isConfirmingGems
+                || (!reserveLocked && player.reserved.length >= maxReserved)}
               onClick={() => onSetActionMode('RESERVE')} />
             <ActionBtn mobile label="Buy Card" active={actionMode === 'BUY'}
               disabled={reserveLocked || isConfirmingGems}
@@ -398,13 +406,23 @@ export default function PlayerInfo({
         )}
 
         {/* Action buttons integrated into panel */}
-        {myTurn && onSetActionMode && !pendingTileChoice && actionMode !== 'RESERVE' && (
+        {myTurn && onSetActionMode && !pendingTileChoice && (
           <>
             <div className="w-px h-12 bg-slate-200 flex-shrink-0" />
             <div className="flex flex-col gap-1 flex-shrink-0">
-              <ActionBtn label="Take Gems" active={actionMode === 'TAKE_GEMS'} onClick={() => onSetActionMode(actionMode === 'TAKE_GEMS' ? null : 'TAKE_GEMS')} />
-              <ActionBtn label="Reserve" active={false} onClick={() => onSetActionMode('RESERVE')} disabled={player.reserved.length >= (gameState?.config.maxReserved ?? 3)} />
-              <ActionBtn label="Buy Card" active={actionMode === 'BUY'} onClick={() => onSetActionMode(actionMode === 'BUY' ? null : 'BUY')} />
+              <ActionBtn label={actionMode === 'TAKE_GEMS' ? 'Cancel' : 'Take Gems'}
+                active={actionMode === 'TAKE_GEMS'}
+                disabled={actionMode === 'RESERVE'}
+                onClick={() => onSetActionMode(actionMode === 'TAKE_GEMS' ? null : 'TAKE_GEMS')} />
+              {/* Clicking Reserve again backs out: the server returns the gold. */}
+              <ActionBtn label={actionMode === 'RESERVE' ? 'Cancel' : 'Reserve'}
+                active={actionMode === 'RESERVE'}
+                onClick={() => onSetActionMode('RESERVE')}
+                disabled={actionMode !== 'RESERVE'
+                  && player.reserved.length >= (gameState?.config.maxReserved ?? 3)} />
+              <ActionBtn label="Buy Card" active={actionMode === 'BUY'}
+                disabled={actionMode === 'RESERVE'}
+                onClick={() => onSetActionMode(actionMode === 'BUY' ? null : 'BUY')} />
             </div>
           </>
         )}
