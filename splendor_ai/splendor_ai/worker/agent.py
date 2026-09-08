@@ -34,6 +34,7 @@ Two safety nets sit on top of the ladder:
 
 from __future__ import annotations
 
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -216,17 +217,32 @@ class MoveAgent:
             return self._torch_ready
         try:
             import torch
-            if self.device == "cpu":
-                # One move at a time on one thread: extra threads only add
-                # scheduling jitter to a 1500 ms budget.
-                torch.set_num_threads(1)
+            threads = self._torch_thread_count()
+            torch.set_num_threads(threads)
             self._torch_ready = True
-            self.log("info", f"torch {torch.__version__} on {self.device}")
+            self.log("info", f"torch {torch.__version__} on {self.device} "
+                             f"({threads} thread{'' if threads == 1 else 's'})")
         except Exception as err:                          # pragma: no cover
             self._torch_ready = False
             self.log("warn", f"torch is unavailable ({err}) — the worker will "
                              f"play on the greedy ladder")
         return self._torch_ready
+
+    def _torch_thread_count(self) -> int:
+        """How many CPU threads torch may use (``TORCH_THREADS``, 0 = auto).
+
+        On CUDA the GEMMs are on the GPU, so one thread is right: more only
+        adds scheduling jitter to a 1500 ms budget.  On a CPU-only box the
+        batched leaf evaluation IS the move -- a ~12.6M-parameter net at a
+        batch of `universes` leaves -- and one thread leaves most of the
+        machine idle, so take up to four cores.  Beyond four the batch is too
+        small to keep them fed and the threads start fighting each other.
+        """
+        if self.cfg.torch_threads > 0:
+            return self.cfg.torch_threads
+        if self.device.startswith("cuda"):
+            return 1
+        return max(1, min(4, os.cpu_count() or 1))
 
     def model_for(self, key: str) -> Optional[ModelHandle]:
         """``MODEL_DIR/<key>.pt`` → ``MODEL_DIR/shared.pt`` → ``None``."""

@@ -69,6 +69,14 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
    激活成功的标志是提示符前面多了 `(.venv)`。
 
    **先装 CUDA 版 torch，再装其余依赖**（否则会装成 CPU 版）。最后一行打印 `True` 说明 3060 可用。
+
+   **没有 N 卡（纯 CPU）也能跑**：把上面那行换成
+   `pip install torch --index-url https://download.pytorch.org/whl/cpu`，
+   然后在 `.env` 里写 `DEVICE=cpu`。网络本身很小（12.6M 参数，fp32 权重 50 MB），
+   一台四核以上的机器每步能跑到有战斗力的模拟数；纯 CPU 时 worker 默认最多用 4 个线程
+   （`TORCH_THREADS=0` 自动，想手动指定就写具体数字）。CPU 上每步模拟数大约是 3060 的
+   三到五成，棋力差一点但不会垮；把 `TIME_BUDGET_MS` 从 1500 提到 3000–5000 就基本补回来了
+   （服务器给每步的上限是 15 秒）。
 3. 配置：
 
    ```powershell

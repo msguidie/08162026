@@ -150,6 +150,11 @@ class WorkerConfig:
     deadline_margin_ms: int = 400
     #: Simulations between two clock reads (a clock read is ~1 % of a sim).
     sim_chunk: int = 8
+    #: torch CPU threads.  0 = auto: one thread on CUDA (the GEMMs are on the
+    #: GPU and extra threads only add jitter), up to four on a CPU-only box,
+    #: where the batched leaf evaluation is the move's dominant cost and one
+    #: thread throws away most of the machine.
+    torch_threads: int = 0
 
     # -- operations ------------------------------------------------------
     log_dir: str = "logs"
@@ -221,6 +226,7 @@ def load_config(env: Optional[Mapping[str, str]] = None,
         root_ensemble=_flag(source, "ROOT_ENSEMBLE", False),
         deadline_margin_ms=_int(source, "DEADLINE_MARGIN_MS", 400, 0),
         sim_chunk=_int(source, "SIM_CHUNK", 8, 1),
+        torch_threads=_int(source, "TORCH_THREADS", 0, 0),
         log_dir=source.get("LOG_DIR", "logs"),
         log_level=source.get("LOG_LEVEL", "INFO").upper(),
         seed=_int(source, "SEED", 0),
