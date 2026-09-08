@@ -64,6 +64,7 @@ interface GameStore {
   addAI: () => void;
   removeAI: (username: string) => void;
   setActionMode: (mode: ActionMode) => void;
+  cancelGemSelection: () => void;
   sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => void;
   chooseBonusTile: (tileId: number) => void;
   returnToLobby: () => void;
@@ -474,9 +475,9 @@ const useGameStore = create<GameStore>((set, get) => {
       }
 
       if (mode === null || mode === currentMode) {
-        // Cancel current mode
-        if (currentMode === 'TAKE_GEMS' && socket && roomId) {
-          socket.emit('game_action', { roomId, action: { type: 'CANCEL_GEMS' } });
+        if (currentMode === 'TAKE_GEMS' || gameState.turnAction?.type === 'TAKE_GEMS') {
+          get().cancelGemSelection();
+          return;
         }
         set({ actionMode: null });
         return;
@@ -493,6 +494,29 @@ const useGameStore = create<GameStore>((set, get) => {
       } else {
         set({ actionMode: mode });
       }
+    },
+
+    // Clearing a half-finished gem take. The server's turnAction is the source of
+    // truth: whatever the local mode says, a pending selection is always cleared,
+    // so the panel can never get stuck showing picked gems it cannot undo.
+    cancelGemSelection: () => {
+      const { gameState, playerIndex, socket, roomId } = get();
+      // Drop the picks from the local snapshot right away: the highlighted gems
+      // are drawn from turnAction, and waiting for the server's broadcast to
+      // clear them is what left players staring at gems they could not undo.
+      // The next broadcast re-syncs, so a rejected cancel cannot desync for long.
+      set(s => ({
+        actionMode: null,
+        gameState: s.gameState && s.gameState.turnAction?.type === 'TAKE_GEMS'
+          ? { ...s.gameState, turnAction: null }
+          : s.gameState,
+      }));
+      if (!socket || !roomId || !gameState) return;
+      if (gameState.phase !== 'PLAYING' || gameState.currentPlayerIndex !== playerIndex) return;
+      if (gameState.turnAction?.type !== 'TAKE_GEMS') return;
+      socket.emit('game_action', { roomId, action: { type: 'CANCEL_GEMS' } }, (res: { error?: string }) => {
+        if (res?.error) showToast(`Could not clear the selection: ${res.error}`, 'warn');
+      });
     },
 
     sendAction: (action: Record<string, unknown>, onComplete?: (success: boolean) => void) => {

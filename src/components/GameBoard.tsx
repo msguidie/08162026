@@ -251,7 +251,8 @@ export default function GameBoard() {
   const cancelGemSelection = () => {
     if (submittingMobileGems) return;
     setMobilePendingGems([]);
-    setActionMode(null);
+    // Clears the server-side selection too, whatever the local mode says.
+    useGameStore.getState().cancelGemSelection();
   };
 
   const confirmMobileGemTake = () => {
@@ -539,6 +540,7 @@ export default function GameBoard() {
           gameMode={gameState.gameMode}
           clockLabel={playerClocks[playerIndex]?.label} clockUrgent={playerClocks[playerIndex]?.urgent}
           onSetActionMode={setActionMode}
+          onCancelGems={cancelGemSelection}
           onClickCard={(card, source) => {
             if (actionMode === 'BUY') sendAction({ type: 'BUY_CARD', cardId: card.id, source });
           }} />

@@ -190,6 +190,9 @@ export default function PlayerInfo({
 
   // ── Self panel ──
   const myTurn = isMe && isCurrentTurn;
+  // The server's turnAction is authoritative: if it holds a half-finished gem
+  // take, the button offers Cancel even when the local mode drifted out of sync.
+  const gemsPending = actionMode === 'TAKE_GEMS' || gameState?.turnAction?.type === 'TAKE_GEMS';
   const pendingTileChoice = false; // handled at GameBoard level
 
   if (mobile) {
@@ -283,13 +286,13 @@ export default function PlayerInfo({
             {/* Until the selection is complete the button clears it instead of
                 being a dead "Confirm" the player cannot escape from. */}
             <ActionBtn mobile
-              label={actionMode === 'TAKE_GEMS'
+              label={gemsPending
                 ? (isConfirmingGems ? 'Confirming…' : (canConfirmGems ? 'Confirm' : 'Cancel'))
                 : 'Take Gems'}
-              active={actionMode === 'TAKE_GEMS'}
+              active={gemsPending}
               disabled={reserveLocked || isConfirmingGems}
               onClick={() => {
-                if (actionMode !== 'TAKE_GEMS') { onSetActionMode('TAKE_GEMS'); return; }
+                if (!gemsPending) { onSetActionMode('TAKE_GEMS'); return; }
                 if (canConfirmGems) onConfirmGems?.();
                 else onCancelGems?.();
               }} />
@@ -410,10 +413,10 @@ export default function PlayerInfo({
           <>
             <div className="w-px h-12 bg-slate-200 flex-shrink-0" />
             <div className="flex flex-col gap-1 flex-shrink-0">
-              <ActionBtn label={actionMode === 'TAKE_GEMS' ? 'Cancel' : 'Take Gems'}
-                active={actionMode === 'TAKE_GEMS'}
+              <ActionBtn label={gemsPending ? 'Cancel' : 'Take Gems'}
+                active={gemsPending}
                 disabled={actionMode === 'RESERVE'}
-                onClick={() => onSetActionMode(actionMode === 'TAKE_GEMS' ? null : 'TAKE_GEMS')} />
+                onClick={() => gemsPending ? onCancelGems?.() : onSetActionMode('TAKE_GEMS')} />
               {/* Clicking Reserve again backs out: the server returns the gold. */}
               <ActionBtn label={actionMode === 'RESERVE' ? 'Cancel' : 'Reserve'}
                 active={actionMode === 'RESERVE'}
