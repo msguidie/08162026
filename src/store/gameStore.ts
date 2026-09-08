@@ -501,14 +501,21 @@ const useGameStore = create<GameStore>((set, get) => {
     // so the panel can never get stuck showing picked gems it cannot undo.
     cancelGemSelection: () => {
       const { gameState, playerIndex, socket, roomId } = get();
-      set({ actionMode: null });
+      // Drop the picks from the local snapshot right away: the highlighted gems
+      // are drawn from turnAction, and waiting for the server's broadcast to
+      // clear them is what left players staring at gems they could not undo.
+      // The next broadcast re-syncs, so a rejected cancel cannot desync for long.
+      set(s => ({
+        actionMode: null,
+        gameState: s.gameState && s.gameState.turnAction?.type === 'TAKE_GEMS'
+          ? { ...s.gameState, turnAction: null }
+          : s.gameState,
+      }));
       if (!socket || !roomId || !gameState) return;
       if (gameState.phase !== 'PLAYING' || gameState.currentPlayerIndex !== playerIndex) return;
       if (gameState.turnAction?.type !== 'TAKE_GEMS') return;
       socket.emit('game_action', { roomId, action: { type: 'CANCEL_GEMS' } }, (res: { error?: string }) => {
-        // A failure leaves the selection on the board, and the button keeps
-        // offering Cancel because it reads the server state, not this flag.
-        if (res?.error) showToast(res.error, 'warn');
+        if (res?.error) showToast(`Could not clear the selection: ${res.error}`, 'warn');
       });
     },
 
