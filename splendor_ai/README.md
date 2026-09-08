@@ -727,6 +727,9 @@ python -m splendor_ai.selfplay.train --config splendor_ai/configs/smoke_cpu.yaml
 python -m splendor_ai.selfplay.train --config splendor_ai/configs/nscc_4xa100.yaml \
     --set selfplay.actors=48 --set search_full.sims=800 --set learner.batch=8192
 
+# a two-hour 1v1 sprint on a whole node (2p only, cheaper search, small net)
+python -m splendor_ai.selfplay.train --config splendor_ai/configs/nscc_2h_1v1.yaml
+
 # resume a run in place (config.yaml is read back from RUN_DIR)
 python -m splendor_ai.selfplay.train --resume runs/nscc0
 
