@@ -118,6 +118,19 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
    bash splendor_ai/scripts/nscc_setup.sh
    ```
 
+   **CUDA 版本必须对上驱动**：PyPI 上 torch 的默认 wheel 现在是 CUDA 13 版，而 ASPIRE 2A 的驱动是 CUDA 12.8，
+   装错了 `torch.cuda.is_available()` 在计算节点上也是 False，训练会悄悄退化成 CPU。脚本已改为默认从
+   cu128 源装 torch；驱动版本用 `nvidia-smi` 右上角确认，要换源就 `TORCH_INDEX=... bash ...nscc_setup.sh`。
+   已经装错的话手动修：
+
+   ```bash
+   conda activate splendor
+   pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128
+   ```
+
+   装完**必须在 GPU 节点上验一次**（登录节点没卡验不出来）：
+   `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"` → 要看到 `True 4`。
+
    它会 `module load anaconda` → 建 conda 环境 `splendor`（Python 3.11）→ `pip install -r splendor_ai/requirements.txt`
    （Linux 上 PyPI 的 torch 自带 CUDA）→ 打印版本 → 做一次导入自检。登录节点上 `torch.cuda.is_available()` 为 False 是正常的。
 

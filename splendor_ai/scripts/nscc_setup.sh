@@ -88,6 +88,15 @@ echo "python      : $(python -V 2>&1) at $(command -v python)"
 # runtime and only needs the host NVIDIA driver.
 echo "--- installing ${REQUIREMENTS}"
 python -m pip install --upgrade pip
+
+# torch FIRST, from a CUDA 12.x index.  The default PyPI wheel is built for
+# CUDA 13, which this cluster's 12.8 driver cannot load: torch then reports
+# `is_available() == False` on the compute nodes too and training silently
+# runs on CPU.  Override with TORCH_INDEX=... if the driver ever moves.
+TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
+echo "--- installing torch from ${TORCH_INDEX}"
+python -m pip install torch --index-url "${TORCH_INDEX}"
+
 python -m pip install -r "${REQUIREMENTS}"
 
 # --- 4. sanity checks -------------------------------------------------------
@@ -98,8 +107,21 @@ python - <<'PY'
 import numpy, torch, yaml
 print(f"  numpy {numpy.__version__}")
 print(f"  torch {torch.__version__}  cuda build {torch.version.cuda}")
-print(f"  torch.cuda.is_available() = {torch.cuda.is_available()} "
-      f"(False on a login node is normal)")
+avail = torch.cuda.is_available()
+print(f"  torch.cuda.is_available() = {avail}")
+if not avail:
+    # A login node has no GPU, so False is expected here.  A DRIVER MISMATCH
+    # also shows up as False and would waste a whole GPU allocation, so name it.
+    try:
+        drv = torch.cuda.driver_version()
+    except Exception:
+        drv = None
+    build = (torch.version.cuda or "0").split(".")[0]
+    print("    login nodes have no GPU, so False is expected HERE.")
+    print(f"    But verify on a GPU node before training: the wheel is a CUDA {build} build")
+    print("    and it needs a driver at least that new.  If a GPU node also reports")
+    print("    False, reinstall torch from an index matching `nvidia-smi`:")
+    print("      pip install --force-reinstall torch --index-url https://download.pytorch.org/whl/cu128")
 print(f"  pyyaml {yaml.__version__}")
 try:
     import tensorboard

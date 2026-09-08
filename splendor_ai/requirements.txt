@@ -3,22 +3,25 @@
 #
 #   pip install -r splendor_ai/requirements.txt
 #
-# CUDA WHEELS
-# -----------
-# On Linux the default PyPI torch wheel already ships the CUDA runtime
-# (cuDNN/cuBLAS are bundled inside it), so on NSCC ASPIRE 2A the plain
-# `pip install torch` below IS the GPU build — do not add an index URL and do
-# not `module load cuda`; the wheel only needs the host NVIDIA driver.
-# Two cases need an explicit index instead:
+# CUDA WHEELS — READ THIS BEFORE INSTALLING ON A GPU BOX
+# ------------------------------------------------------
+# The default PyPI torch wheel now ships CUDA 13, which needs a very recent
+# NVIDIA driver.  NSCC ASPIRE 2A runs a CUDA 12.8 driver, so the default wheel
+# silently gives you `torch.cuda.is_available() == False` and the trainer falls
+# back to CPU.  Install torch from the cu128 index INSTEAD of the line below:
 #
-#   CPU-only box (this sandbox, a laptop):
+#     pip install torch --index-url https://download.pytorch.org/whl/cu128
+#     pip install -r splendor_ai/requirements.txt        # the rest
+#
+# Check what your driver supports with `nvidia-smi` (top right, "CUDA Version")
+# and pick the matching index: cu126, cu128, ...  A CUDA 12.x wheel runs on any
+# 12.x driver (minor-version compatibility); a CUDA 13 wheel does not.
+#
+#   CPU-only box (a laptop, a login node you only run tests on):
 #     pip install torch --index-url https://download.pytorch.org/whl/cpu
-#   a driver too old for the default wheel's CUDA (check `nvidia-smi`):
-#     pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   Windows deployment worker (RTX 3060):
+#     pip install torch --index-url https://download.pytorch.org/whl/cu126
 #
-# The Windows deployment worker (RTX 3060) uses the ordinary CUDA wheel:
-#     pip install torch --index-url https://download.pytorch.org/whl/cu124
-
 numpy>=1.26
 torch>=2.2
 pyyaml>=6.0
