@@ -230,7 +230,7 @@ def make_record(state: GameState, seat: int, policy: np.ndarray,
 
 
 def finish_game_records(records: List[np.ndarray], z: np.ndarray,
-                        z_weight: float, scores: Sequence[int],
+                        z_weight: float, scores: Sequence[float],
                         stuck: Sequence[bool], plies: int) -> None:
     """Stamp the game outcome onto every record of that game (in place)."""
     z16 = np.asarray(z, dtype=np.float16)[:4]

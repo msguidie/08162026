@@ -130,7 +130,7 @@ export default function WaitingRoom() {
             </div>
             <p className="text-[10px] text-slate-400 text-center">
               {isOneVsTwo
-                ? 'The solo player always goes first. Solo needs 15 points; the duo needs 32 combined.'
+                ? 'The solo player always goes first. Solo needs 15 points; the duo needs 33 combined.'
                 : lobbyTeamLayout === 'ADJACENT'
                   ? 'Teammates will sit next to each other around the board.'
                   : 'Teammates will sit across from each other around the board.'}

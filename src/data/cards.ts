@@ -41,6 +41,9 @@ addCycle(3, 4, [0, 0, 0, 3, 6]);
 addCycle(3, 5, [0, 3, 0, 0, 7]);
 
 // NOBLE TILES: 10
+// The catalogue value. What a tile actually pays is stamped per game by the
+// server (3 / 2 / 1.5 at 2 / 3 / 4 players — gameLogic.tilePointsFor), so read
+// `tile.points` off the game state, never this table.
 let tileId = 0;
 
 for (let i = 0; i < 5; i++) {

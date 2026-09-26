@@ -9,6 +9,7 @@ const suites = [
   ['replayGithub', require('./replayGithub.test')],
   ['replayStore', require('./replayStore.test')],
   ['cancelReserve', require('./cancelReserve.test')],
+  ['tilePoints', require('./tilePoints.test')],
   ['aiFallback', require('./aiFallback.test')],
   ['aiBridge', require('./aiBridge.test')],
   ['replay e2e', require('./replay.e2e')],

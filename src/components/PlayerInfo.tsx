@@ -35,6 +35,12 @@ interface PlayerInfoProps {
   isConfirmingGems?: boolean;
 }
 
+// Nobles are worth 3 / 2 / 1.5 points depending on the player count, so the
+// "+N" beside a score has to add the tiles up rather than multiply by three.
+function tilePoints(player: Player) {
+  return player.bonusTiles.reduce((sum, tile) => sum + tile.points, 0);
+}
+
 function MiniCardTile({ color, size = 'md' }: { color: number; size?: 'xs' | 'sm' | 'md' }) {
   const w = size === 'xs' ? 10 : size === 'sm' ? 16 : 20;
   const h = size === 'xs' ? 14 : size === 'sm' ? 20 : 26;
@@ -117,7 +123,7 @@ export default function PlayerInfo({
             )}
             <div className="text-base font-display font-bold text-amber-600 leading-none">{player.score}</div>
             {player.bonusTiles.length > 0 && (
-              <div className="text-[10px] text-[#7B6FA0] font-display leading-none">+{player.bonusTiles.length * 3}</div>
+              <div className="text-[10px] text-[#7B6FA0] font-display leading-none">+{tilePoints(player)}</div>
             )}
           </div>
         )}
@@ -333,7 +339,7 @@ export default function PlayerInfo({
           <div className="text-sm font-display">
             <span className="text-amber-600 font-bold">{player.score}</span>
             {player.bonusTiles.length > 0 && (
-              <span className="text-[#7B6FA0] ml-0.5 text-[11px]">+{player.bonusTiles.length * 3}</span>
+              <span className="text-[#7B6FA0] ml-0.5 text-[11px]">+{tilePoints(player)}</span>
             )}
           </div>
           {clockLabel && (

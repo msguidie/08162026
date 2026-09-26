@@ -43,7 +43,7 @@ TRUNCATION_Z_WEIGHT = 0.3
 #: have *different* ones, so only progress towards them is comparable; both
 #: TEAM sides share one, which is what makes the TEAM comparison symmetric.
 _SOLO_THRESHOLD = 15
-_DUO_THRESHOLD = 34
+_DUO_THRESHOLD = 33
 _TEAM_THRESHOLD = 30
 
 

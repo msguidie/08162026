@@ -25,7 +25,7 @@ from splendor_ai.rules.actions import (
 )
 from splendor_ai.rules.cards import (
     CARD_COST, CARD_POINTS, CARD_REWARD, CARD_TIER, CARDS_BY_TIER,
-    TILE_POINTS, TILE_REQ,
+    TILE_REQ,
 )
 from splendor_ai.worker.adapter import (
     HydrationError, hydrate, payload_mode_key, to_wire,
@@ -44,8 +44,10 @@ def js_card(card_id: int) -> Dict[str, Any]:
             "cost": list(CARD_COST[card_id])}
 
 
-def js_tile(tile_id: int) -> Dict[str, Any]:
-    return {"id": tile_id, "points": TILE_POINTS[tile_id],
+def js_tile(tile_id: int, points: float) -> Dict[str, Any]:
+    # `points` is the game's tile value (3 / 2 / 1.5 by player count), which is
+    # what the server stamps on every dealt tile — not the catalogue's 3.
+    return {"id": tile_id, "points": points,
             "requirement": list(TILE_REQ[tile_id])}
 
 
@@ -71,7 +73,7 @@ def build_observation(state: E.GameState, seat: int,
             "username": p.username,
             "gems": list(p.gems),
             "cards": [js_card(c) for c in p.cards],
-            "bonusTiles": [js_tile(t) for t in p.tiles],
+            "bonusTiles": [js_tile(t, state.config["tilePoints"]) for t in p.tiles],
             "score": p.score,
             "avatarSeed": p.avatar_seed,
         }
@@ -94,7 +96,7 @@ def build_observation(state: E.GameState, seat: int,
         "board": [[js_card(c) for c in row] for row in state.board],
         "deckCounts": list(state.deck_counts),
         "gems": list(state.gems),
-        "bonusTiles": [js_tile(t) for t in state.tiles],
+        "bonusTiles": [js_tile(t, state.config["tilePoints"]) for t in state.tiles],
         "players": players,
         "currentPlayerIndex": state.current_player,
         "roundStartPlayer": state.round_start_player,

@@ -54,6 +54,16 @@ for (let i = 0; i < 5; i++) {
   ALL_BONUS_TILES.push({ id: tileId++, points: 3, requirement: req });
 }
 
+// A bonus tile is worth less the more players are competing for the same ten
+// tiles: 3 points at two players, 2 at three, 1.5 at four.  Every dealt tile
+// carries the value for ITS game (see createInitialGameState), so scoring,
+// the UI and replays all read `tile.points` and never the catalogue's 3.
+// Four-player games (2v2 included) therefore have half-integer scores; the
+// thresholds (15 / >30 / 33) and every comparison work unchanged on halves.
+function tilePointsFor(numPlayers) {
+  return numPlayers <= 2 ? 3 : numPlayers === 3 ? 2 : 1.5;
+}
+
 // ── Helpers ──
 
 function shuffle(arr) {
@@ -185,6 +195,7 @@ function createInitialGameState(players, options = {}) {
     maxReserved: 3,
     winThreshold: 15,
     take2MinStack: 4,
+    tilePoints: tilePointsFor(n),
   };
 
   const tier1 = shuffle(ALL_CARDS.filter(c => c.tier === 1));
@@ -193,7 +204,9 @@ function createInitialGameState(players, options = {}) {
 
   const board = [tier1.splice(0, 4), tier2.splice(0, 4), tier3.splice(0, 4)];
   const decks = [tier1, tier2, tier3];
-  const bonusTiles = shuffle(ALL_BONUS_TILES).slice(0, config.revealedTiles);
+  const bonusTiles = shuffle(ALL_BONUS_TILES)
+    .slice(0, config.revealedTiles)
+    .map(tile => ({ ...tile, points: config.tilePoints }));
   const gems = [config.tokensPerColor, config.tokensPerColor, config.tokensPerColor, config.tokensPerColor, config.tokensPerColor, config.wildTokens];
 
   const gamePlayers = players.map(p => ({
@@ -788,6 +801,7 @@ function processResign(state, playerIndex) {
 module.exports = {
   ALL_CARDS,
   ALL_BONUS_TILES,
+  tilePointsFor,
   createInitialGameState,
   clientView,
   clientViewForPlayer,

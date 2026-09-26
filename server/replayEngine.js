@@ -41,10 +41,13 @@ function cloneCard(id, actionIndex) {
   return { id: card.id, tier: card.tier, reward: card.reward, points: card.points, cost: [...card.cost] };
 }
 
-function cloneTile(id, actionIndex) {
+// `points` comes from the game being replayed, not from the catalogue: a tile
+// is worth 3 / 2 / 1.5 depending on the player count (gameLogic.tilePointsFor),
+// and the replay only stores tile ids.
+function cloneTile(id, actionIndex, points) {
   const tile = tilesById.get(id);
   if (!tile) throw new ReplayCorruptError(actionIndex, `Unknown tile id ${id}`);
-  return { id: tile.id, points: tile.points, requirement: [...tile.requirement] };
+  return { id: tile.id, points, requirement: [...tile.requirement] };
 }
 
 function deepClone(value) {
@@ -148,7 +151,7 @@ function buildInitialState(json) {
   state.board = json.setup.board.map(row => row.map(id => cloneCard(id, -1)));
   state.decks = json.setup.decks.map(deck => deck.map(id => cloneCard(id, -1)));
   state.deckCounts = [state.decks[0].length, state.decks[1].length, state.decks[2].length];
-  state.bonusTiles = json.setup.tiles.map(id => cloneTile(id, -1));
+  state.bonusTiles = json.setup.tiles.map(id => cloneTile(id, -1, state.config.tilePoints));
   state.currentPlayerIndex = json.first;
   state.roundStartPlayer = json.first;
   state.timeControl = null;

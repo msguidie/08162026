@@ -198,6 +198,40 @@ def test_single_qualifying_noble_is_auto_claimed_after_any_action():
     assert p.state.last_event["tileClaimed"] == {"tileId": 0, "playerIndex": 0}
 
 
+@pytest.mark.parametrize("n,mode,layout,expected", [
+    (2, "INDIVIDUAL", None, 3),
+    (3, "INDIVIDUAL", None, 2),
+    (4, "INDIVIDUAL", None, 1.5),
+    (3, "ONE_V_TWO", None, 2),
+    (4, "TEAM", "ADJACENT", 1.5),
+])
+def test_a_noble_is_worth_3_2_or_1_5_by_player_count(n, mode, layout, expected):
+    """`gameLogic.tilePointsFor`, checked against the Node engine itself.
+
+    Four-player scores are half-integers; everything downstream (thresholds,
+    tie-breaks, the byte serialisation) works on halves unchanged.
+    """
+    cards = discount_cards([4, 4, 0, 0, 0])          # qualifies tile 0 only
+    players = [{"cards": cards, "gems": [0] * 6}] + [{} for _ in range(n - 1)]
+    spec = position(n=n, mode=mode, layout=layout, tiles=[0], gems=FULL_GEMS,
+                    players=players)
+    p = run(spec, [["apply", ["G", [0, 1, 2]]]])
+    assert p.state.config["tilePoints"] == expected
+    assert p.state.players[0].tiles == [0]
+    assert p.state.players[0].score == expected
+
+
+def test_half_point_scores_survive_the_byte_round_trip():
+    cards = discount_cards([4, 4, 0, 0, 0])
+    spec = position(n=4, tiles=[0], gems=FULL_GEMS,
+                    players=[{"cards": cards, "gems": [0] * 6}, {}, {}, {}])
+    p = run(spec, [["apply", ["G", [0, 1, 2]]]])
+    assert p.state.players[0].score == 1.5
+
+    back = E.GameState.from_bytes(p.state.to_bytes())
+    assert [q.score for q in back.players] == [q.score for q in p.state.players]
+
+
 def test_two_qualifying_nobles_require_a_choice_and_freeze_the_turn():
     cid, color = _cheapest_single_colour_card()
     cards = discount_cards([4, 4, 4, 0, 0])          # qualifies tiles 0 and 1
@@ -356,13 +390,13 @@ def test_team_final_round_ends_the_game_when_it_holds():
 
 
 def test_one_v_two_final_round_is_irrevocable_and_ties_on_excess():
-    """Solo needs 15, the duo needs 34; equal excess is a draw and the final
+    """Solo needs 15, the duo needs 33; equal excess is a draw and the final
     round cannot be revoked the way a 2v2 one can."""
     spec = position(n=3, mode="ONE_V_TWO", gems=FULL_GEMS,
                     current=0, round_start=0,
                     players=[{"gems": [0] * 6, "score": 20},
                              {"gems": [0] * 6, "score": 20},
-                             {"gems": [0] * 6, "score": 19}])
+                             {"gems": [0] * 6, "score": 18}])
     p = run(spec, [["apply", ["G", [0, 1, 2]]], ["probe"],
                    ["apply", ["G", [0, 1, 2]]],
                    ["apply", ["G", [0, 1, 2]]]])

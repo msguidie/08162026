@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from ..rules import engine as E
 from ..rules.cards import (CARD_COST, CARD_POINTS, CARD_REWARD, CARD_TIER,
-                           TILE_POINTS, TILE_REQ)
+                           TILE_REQ)
 from .agent import MoveAgent
 from .config import WorkerConfig, load_config
 from .client import Logger, WorkerClient
@@ -46,9 +46,11 @@ def _card(cid: int) -> Dict[str, Any]:
             "points": CARD_POINTS[cid], "cost": list(CARD_COST[cid])}
 
 
-def _tile(tid: int) -> Dict[str, Any]:
-    return {"id": tid, "points": TILE_POINTS[tid],
-            "requirement": list(TILE_REQ[tid])}
+def _tile(tid: int, points: float) -> Dict[str, Any]:
+    # `points` is the game's tile value (3 / 2 / 1.5 by player count), which
+    # is what the real server sends -- the catalogue's 3 would be rejected by
+    # the adapter in a three- or four-player game.
+    return {"id": tid, "points": points, "requirement": list(TILE_REQ[tid])}
 
 
 def synthetic_request(state: E.GameState, seat: Optional[int] = None,
@@ -59,6 +61,7 @@ def synthetic_request(state: E.GameState, seat: Optional[int] = None,
     other seats' reserved cards collapsed to ``{id, tier, hidden, known}``.
     """
     seat = state.current_player if seat is None else seat
+    tile_points = state.config["tilePoints"]
     known = {cid for p in state.players
              for cid, public in zip(p.reserved, p.reserved_public) if public}
     players: List[Dict[str, Any]] = []
@@ -66,7 +69,7 @@ def synthetic_request(state: E.GameState, seat: Optional[int] = None,
         entry: Dict[str, Any] = {
             "username": p.username, "gems": list(p.gems),
             "cards": [_card(c) for c in p.cards],
-            "bonusTiles": [_tile(t) for t in p.tiles],
+            "bonusTiles": [_tile(t, tile_points) for t in p.tiles],
             "score": p.score, "avatarSeed": p.avatar_seed,
         }
         if p.team_id is not None:
@@ -83,7 +86,7 @@ def synthetic_request(state: E.GameState, seat: Optional[int] = None,
         "board": [[_card(c) for c in row] for row in state.board],
         "deckCounts": list(state.deck_counts),
         "gems": list(state.gems),
-        "bonusTiles": [_tile(t) for t in state.tiles],
+        "bonusTiles": [_tile(t, tile_points) for t in state.tiles],
         "players": players,
         "currentPlayerIndex": state.current_player,
         "roundStartPlayer": state.round_start_player,
