@@ -23,8 +23,9 @@ updating all four.
   "setup": {
     "board": [[4 card ids], [4 ids], [4 ids]],   // tier1, tier2, tier3 face-up, left→right
     "decks": [[ids...], [ids...], [ids...]],      // remaining deck arrays in SERVER ORDER: pop() takes the LAST element
-    "tiles": [tile ids]                           // revealed nobles, in order
-  },                                              // a noble's value is NOT stored: it is 3/2/1.5 by "n"
+    "tiles": [tile ids],                          // revealed nobles, in order
+    "tp": 1.5                                     // what one noble paid: 3/2/1.5 at 2/3/4 players.
+  },                                              // Absent in files recorded before the rule — those were all 3.
 
   "actions": [                          // one entry per COMPLETED turn action, in order
     [0, "G", [0, 1, 2]],                //  G  take gems: colors list (1–3 entries; same color twice for take-2-same)

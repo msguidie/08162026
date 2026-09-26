@@ -110,18 +110,35 @@ async function run() {
 
   suite('bonus tile points — replays');
 
-  await test('a replay rebuilds tiles at its own game size', () => {
-    const two = reconstruct(fixtures.nobleGame);
-    const twoTiles = two.frames[0].state.bonusTiles;
-    assert(twoTiles.length > 0, 'the 2p fixture reveals tiles');
-    for (const tile of twoTiles) assertEqual(tile.points, 3, 'replayed 2p tile');
+  await test('a replay scores nobles the way the recorded game did', () => {
+    // v1 files carry no `setup.tp`: every game they recorded paid a flat 3.
+    const legacy = JSON.parse(JSON.stringify(fixtures.teamGame));
+    legacy.setup.tiles = [0, 5];
+    assert(legacy.setup.tp === undefined, 'the fixture is a pre-rule replay');
+    for (const tile of reconstruct(legacy).frames[0].state.bonusTiles) {
+      assertEqual(tile.points, 3, 'a pre-rule 4p replay keeps its 3-point nobles');
+    }
 
-    const four = JSON.parse(JSON.stringify(fixtures.teamGame));
-    four.setup.tiles = [0, 5];
-    const rebuilt = reconstruct(four);
-    const fourTiles = rebuilt.frames[0].state.bonusTiles;
-    assertEqual(fourTiles.map(t => t.id), [0, 5], 'the replayed tiles');
-    for (const tile of fourTiles) assertEqual(tile.points, 1.5, 'replayed 4p tile');
+    // A game recorded now carries what its own nobles paid.
+    const current = JSON.parse(JSON.stringify(legacy));
+    current.setup.tp = 1.5;
+    const rebuilt = reconstruct(current);
+    const tiles = rebuilt.frames[0].state.bonusTiles;
+    assertEqual(tiles.map(t => t.id), [0, 5], 'the replayed tiles');
+    for (const tile of tiles) assertEqual(tile.points, 1.5, 'replayed 4p tile');
+    assertEqual(rebuilt.frames[0].state.config.tilePoints, 1.5, 'and the config agrees');
+  });
+
+  await test('the recorder stores the value its game was dealt', () => {
+    const recorder = require('../replayRecorder');
+    for (const [n, expected] of [[2, 3], [3, 2], [4, 1.5]]) {
+      const state = makeGame(n);
+      const room = { id: `room-${n}`, gameState: state, created: 1725280000000,
+                     playerSockets: state.players.map(() => ({})) };
+      const recording = recorder.begin(room);
+      assertEqual(recording.setup.tp, expected, `${n}p recorded tile value`);
+      recorder.discard(room);
+    }
   });
 }
 

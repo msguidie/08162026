@@ -7,6 +7,7 @@
 // ═══════════════════════════════════════════════════════════
 
 const replayStore = require('./replayStore');
+const { tilePointsFor } = require('./gameLogic');
 
 // roomId → recording. Bounded so a room that is dropped without a
 // finish()/discard() call can never grow the process unboundedly.
@@ -72,6 +73,10 @@ function begin(room) {
         board: state.board.map(row => row.map(card => card.id)),
         decks: state.decks.map(deck => deck.map(card => card.id)),
         tiles: state.bonusTiles.map(tile => tile.id),
+        // What a noble paid in THIS game.  Recorded rather than re-derived so
+        // a game stays scored the way it was played if the rule moves again;
+        // files written before the rule existed have no `tp` and were all 3.
+        tp: state.config?.tilePoints ?? tilePointsFor(state.numPlayers),
       },
       actions: [],
     };
