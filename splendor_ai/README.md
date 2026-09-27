@@ -158,6 +158,12 @@ Things a naive port gets wrong — each is covered by a named test:
     detects it; the validation run hit 4,051 such positions.
 16. **`_tileClaimed` is consumed by the broadcast**, not by the engine — it is
     attached to the action result and deleted from the state.
+17. **A noble is worth 3 / 2 / 1.5 points at 2 / 3 / 4 players**
+    (`config["tilePoints"]`, `gameLogic.tilePointsFor`).  Four-player scores —
+    2v2 included — are therefore half-integers; the thresholds (15, >30, 33)
+    and every comparison are unchanged, and halves are exact in binary floating
+    point, so nothing rounds.  The tile catalogue still carries 3: what a tile
+    pays comes from the game, not from the table.
 
 ### Hidden information (`view.py`)
 
@@ -726,6 +732,9 @@ bash splendor_ai/scripts/smoke_cpu.sh /tmp/run1        # somewhere else
 python -m splendor_ai.selfplay.train --config splendor_ai/configs/smoke_cpu.yaml
 python -m splendor_ai.selfplay.train --config splendor_ai/configs/nscc_4xa100.yaml \
     --set selfplay.actors=48 --set search_full.sims=800 --set learner.batch=8192
+
+# a two-hour 1v1 sprint on a whole node (2p only, cheaper search, small net)
+python -m splendor_ai.selfplay.train --config splendor_ai/configs/nscc_2h_1v1.yaml
 
 # resume a run in place (config.yaml is read back from RUN_DIR)
 python -m splendor_ai.selfplay.train --resume runs/nscc0

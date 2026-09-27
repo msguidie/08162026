@@ -147,8 +147,8 @@ def test_one_v_two_duo_wins():
 
 
 def test_one_v_two_equal_excess_is_a_draw():
-    # solo 15 - 15 == 0 and duo 34 - 34 == 0: both sides qualify equally.
-    s = _finish(_game(3, "ONE_V_TWO", scores=[15, 17, 17]))
+    # solo 15 - 15 == 0 and duo 33 - 33 == 0: both sides qualify equally.
+    s = _finish(_game(3, "ONE_V_TWO", scores=[15, 17, 16]))
     assert sorted(s.game_result["winningTeamIds"]) == [0, 1]
     assert V.terminal_values(s).tolist() == [0.0, 0.0, 0.0, 0.0]
 
@@ -245,8 +245,8 @@ def test_standings_values_for_team_are_symmetric():
 # ── 1v2 truncation: progress towards two different thresholds ─────────────
 
 def test_standings_values_1v2_equal_progress_is_neutral():
-    """15 and 34 are the two thresholds, so 6 solo points and 14 duo points are
-    the same fraction of the way home; the old `(solo-15)-(duo-34)` margin
+    """15 and 33 are the two thresholds, so 6 solo points and 14 duo points are
+    the same fraction of the way home; the old `(solo-15)-(duo-33)` margin
     scored this +1 for the solo because of the constant 19-point offset."""
     s = _game(3, "ONE_V_TWO", scores=[6, 7, 7])          # 0.400 vs 0.412
     z = V.standings_values(s)
@@ -255,14 +255,14 @@ def test_standings_values_1v2_equal_progress_is_neutral():
 
 
 def test_standings_values_1v2_solo_progress_wins():
-    s = _game(3, "ONE_V_TWO", scores=[10, 5, 5])          # 10/15 vs 10/34
+    s = _game(3, "ONE_V_TWO", scores=[10, 5, 5])          # 10/15 vs 10/33
     z = V.standings_values(s)
-    assert z[0] > 0.0 and np.allclose(z[0], 2 * (10 / 15 - 10 / 34))
+    assert z[0] > 0.0 and np.allclose(z[0], 2 * (10 / 15 - 10 / 33))
     assert np.allclose(z[1:3], -z[0]) and z[3] == 0.0
 
 
 def test_standings_values_1v2_duo_progress_wins():
-    s = _game(3, "ONE_V_TWO", scores=[5, 15, 15])         # 5/15 vs 30/34
+    s = _game(3, "ONE_V_TWO", scores=[5, 15, 15])         # 5/15 vs 30/33
     z = V.standings_values(s)
     assert z[0] < 0.0 and z[1] > 0.0 and z[2] > 0.0
     assert float(z.min()) >= -1.0 and float(z.max()) <= 1.0
@@ -271,10 +271,10 @@ def test_standings_values_1v2_duo_progress_wins():
 def test_standings_values_1v2_use_the_real_rule_once_a_side_qualifies():
     """Past a threshold the engine's own resolver decides the game, so the
     standings say exactly what the end of the round will."""
-    both_tied = _game(3, "ONE_V_TWO", scores=[15, 17, 17])   # excess 0 vs 0
+    both_tied = _game(3, "ONE_V_TWO", scores=[15, 17, 16])   # excess 0 vs 0
     assert V.standings_values(both_tied).tolist() == [0.0, 0.0, 0.0, 0.0]
 
-    solo_by_one = _game(3, "ONE_V_TWO", scores=[16, 17, 17])  # excess 1 vs 0
+    solo_by_one = _game(3, "ONE_V_TWO", scores=[16, 17, 16])  # excess 1 vs 0
     assert V.standings_values(solo_by_one).tolist() == [1.0, -1.0, -1.0, 0.0]
 
     duo_only = _game(3, "ONE_V_TWO", scores=[9, 20, 20])      # duo qualified

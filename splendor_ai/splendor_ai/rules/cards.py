@@ -42,7 +42,9 @@ class Card(NamedTuple):
 
 class Tile(NamedTuple):
     id: int
-    points: int                     # always 3 in this variant
+    points: int                     # the catalogue value, always 3; what a
+    #                                 tile is actually worth depends on the
+    #                                 player count (engine.tile_points_for)
     requirement: Tuple[int, int, int, int, int]
 
 

@@ -76,11 +76,11 @@ def test_team_winner_resolution_matches_node(scores, expect):
 
 
 @pytest.mark.parametrize("scores,expect", [
-    ([15, 20, 14], [0, 1]),            # both exactly at the bar -> excess 0 == 0
-    ([14, 20, 14], [1]),               # solo short, duo exactly at 34
-    ([14, 20, 13], []),                # nobody qualifies
-    ([20, 20, 19], [0, 1]),            # equal excess (5 vs 5)
-    ([21, 20, 19], [0]),
+    ([15, 19, 14], [0, 1]),            # both exactly at the bar -> excess 0 == 0
+    ([14, 19, 14], [1]),               # solo short, duo exactly at 33
+    ([14, 19, 13], []),                # nobody qualifies
+    ([20, 20, 18], [0, 1]),            # equal excess (5 vs 5)
+    ([21, 20, 18], [0]),
     ([15, 25, 20], [1]),
 ])
 def test_one_v_two_winner_resolution_matches_node(scores, expect):

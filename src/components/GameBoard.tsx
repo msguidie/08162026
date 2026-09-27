@@ -666,7 +666,7 @@ export function TeamGameOver({ gameState }: { gameState: GameState }) {
           const total = members.reduce((sum, player) => sum + player.score, 0);
           const secondScore = [...members].sort((a, b) => b.score - a.score)[1]?.score ?? 0;
           const won = winningTeamIds.includes(teamId);
-          const threshold = teamId === 0 ? 15 : 32;
+          const threshold = teamId === 0 ? 15 : 33;
           return (
             <div key={teamId} className={`rounded-xl p-3 border ${
               won ? 'bg-amber-50 border-amber-200' : 'bg-white/45 border-white/60'

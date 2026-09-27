@@ -56,7 +56,7 @@ from ..rules import engine as E
 from ..rules.actions import CHOOSE_TILE_START, NUM_ACTIONS
 from ..rules.cards import (
     CARD_COST, CARD_POINTS, CARD_REWARD, CARD_TIER, CARD_TIER0, CARDS_BY_TIER,
-    NUM_CARDS, NUM_TILES, TILE_POINTS, TILE_REQ,
+    NUM_CARDS, NUM_TILES, TILE_REQ,
 )
 
 __all__ = [
@@ -110,6 +110,20 @@ def _as_int(value: Any, what: str) -> int:
     return out
 
 
+def _as_score(value: Any, what: str) -> float:
+    """A score: whole, or a half-integer in a four-player game.
+
+    ``int`` when whole so a 2p/3p state hydrates to exactly the value the
+    server sent, ``float`` only for the halves a 1.5-point noble creates.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HydrationError(f"{what} is not a number: {value!r}")
+    doubled = float(value) * 2
+    if doubled != int(doubled):
+        raise HydrationError(f"{what} is not a whole or half point: {value!r}")
+    return int(value) if float(value).is_integer() else float(value)
+
+
 def _card_id(entry: Any, what: str) -> int:
     """Card id out of an int or a ``{id: ...}`` object (``-1`` = hidden)."""
     if isinstance(entry, Mapping):
@@ -159,14 +173,16 @@ def _check_card_object(entry: Any, cid: int, what: str) -> None:
                 f"{list(CARD_COST[cid])}")
 
 
-def _check_tile_object(entry: Any, tid: int, what: str) -> None:
+def _check_tile_object(entry: Any, tid: int, what: str,
+                       points: float) -> None:
+    """``points`` is this game's tile value (3 / 2 / 1.5 by player count)."""
     if not isinstance(entry, Mapping):
         return
     if "points" in entry and entry["points"] is not None:
-        if _as_int(entry["points"], f"{what}.points") != TILE_POINTS[tid]:
+        if _as_score(entry["points"], f"{what}.points") != points:
             raise HydrationError(
-                f"{what}: tile {tid} says points {entry['points']}, the table "
-                f"says {TILE_POINTS[tid]}")
+                f"{what}: tile {tid} says points {entry['points']}, a game "
+                f"this size pays {points}")
     req = entry.get("requirement")
     if isinstance(req, Sequence) and not isinstance(req, (str, bytes)):
         got = tuple(_as_int(r, f"{what}.requirement") for r in req)
@@ -293,7 +309,8 @@ def hydrate(payload: Mapping[str, Any],
                    for i, t in enumerate(tiles_raw or [])]
     if validate:
         for i, entry in enumerate(tiles_raw or []):
-            _check_tile_object(entry, state.tiles[i], f"bonusTiles[{i}]")
+            _check_tile_object(entry, state.tiles[i], f"bonusTiles[{i}]",
+                               cfg["tilePoints"])
 
     # -- players ---------------------------------------------------------
     known_reserved = {
@@ -369,13 +386,13 @@ def hydrate(payload: Mapping[str, Any],
             what = f"players[{i}].bonusTiles[{j}]"
             tid = _tile_id(entry, what)
             if validate:
-                _check_tile_object(entry, tid, what)
+                _check_tile_object(entry, tid, what, cfg["tilePoints"])
             p.tiles.append(tid)
 
-        p.score = _as_int(raw.get("score", 0), f"players[{i}].score")
+        p.score = _as_score(raw.get("score", 0), f"players[{i}].score")
         if validate:
             derived = (sum(CARD_POINTS[c] for c in p.cards)
-                       + sum(TILE_POINTS[t] for t in p.tiles))
+                       + len(p.tiles) * cfg["tilePoints"])
             if derived != p.score:
                 raise HydrationError(
                     f"players[{i}].score is {p.score} but its cards and tiles "
@@ -448,7 +465,7 @@ def hydrate(payload: Mapping[str, Any],
 
 
 def _config_of(view: Mapping[str, Any], num_players: int,
-               validate: bool) -> Dict[str, int]:
+               validate: bool) -> Dict[str, Any]:
     """The payload's config, defaulted from ``make_config`` per key."""
     default = E.make_config(num_players)
     raw = view.get("config")
@@ -458,11 +475,17 @@ def _config_of(view: Mapping[str, Any], num_players: int,
     for key, value in raw.items():
         if key in out and isinstance(value, (int, float)) \
                 and not isinstance(value, bool):
-            out[key] = int(value)
+            # tilePoints is the one key that is not a whole number (1.5 at
+            # four players); int() would silently turn a noble into 1 point.
+            out[key] = float(value) if key == "tilePoints" else int(value)
     if validate and out["maxReserved"] != default["maxReserved"]:
         raise HydrationError(
             f"config.maxReserved is {out['maxReserved']}, this variant uses "
             f"{default['maxReserved']}")
+    if validate and out["tilePoints"] != default["tilePoints"]:
+        raise HydrationError(
+            f"config.tilePoints is {out['tilePoints']}, a {num_players}-player "
+            f"game pays {default['tilePoints']} per tile")
     return out
 
 

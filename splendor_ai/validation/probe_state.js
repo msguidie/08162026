@@ -174,7 +174,10 @@ function buildState(req) {
   if (o.board) s.board = o.board.map(row => row.map(id => CARD[id]));
   if (o.decks) s.decks = o.decks.map(row => row.map(id => CARD[id]));
   s.deckCounts = [s.decks[0].length, s.decks[1].length, s.decks[2].length];
-  if (o.tiles) s.bonusTiles = o.tiles.map(id => TILE[id]);
+  // Stamped with THIS game's tile value (3 / 2 / 1.5 by player count), exactly
+  // as createInitialGameState deals them — TILE[] is the catalogue, always 3.
+  const tile = id => ({ ...TILE[id], points: s.config.tilePoints });
+  if (o.tiles) s.bonusTiles = o.tiles.map(tile);
   if (o.gems) s.gems = o.gems.slice();
   if (o.players) {
     o.players.forEach((pp, i) => {
@@ -182,7 +185,7 @@ function buildState(req) {
       if (pp.gems) p.gems = pp.gems.slice();
       if (pp.cards) p.cards = pp.cards.map(id => CARD[id]);
       if (pp.reserved) p.reserved = pp.reserved.map(id => CARD[id]);
-      if (pp.tiles) p.bonusTiles = pp.tiles.map(id => TILE[id]);
+      if (pp.tiles) p.bonusTiles = pp.tiles.map(tile);
       p.score = pp.score !== undefined
         ? pp.score
         : p.cards.reduce((a, c) => a + c.points, 0) + p.bonusTiles.reduce((a, t) => a + t.points, 0);

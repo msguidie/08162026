@@ -69,6 +69,14 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
    激活成功的标志是提示符前面多了 `(.venv)`。
 
    **先装 CUDA 版 torch，再装其余依赖**（否则会装成 CPU 版）。最后一行打印 `True` 说明 3060 可用。
+
+   **没有 N 卡（纯 CPU）也能跑**：把上面那行换成
+   `pip install torch --index-url https://download.pytorch.org/whl/cpu`，
+   然后在 `.env` 里写 `DEVICE=cpu`。网络本身很小（12.6M 参数，fp32 权重 50 MB），
+   一台四核以上的机器每步能跑到有战斗力的模拟数；纯 CPU 时 worker 默认最多用 4 个线程
+   （`TORCH_THREADS=0` 自动，想手动指定就写具体数字）。CPU 上每步模拟数大约是 3060 的
+   三到五成，棋力差一点但不会垮；把 `TIME_BUDGET_MS` 从 1500 提到 3000–5000 就基本补回来了
+   （服务器给每步的上限是 15 秒）。
 3. 配置：
 
    ```powershell
@@ -103,7 +111,21 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
 
 ## D. NSCC ASPIRE 2A 训练（4×A100-40G，PBS `ai` 队列）
 
-假设代码已经在 NSCC 的工作目录里（例如 `~/splendor`），以下都在**登录节点**执行；脚本里每一行都有英文注释。
+假设代码已经在 NSCC 的工作目录里，以下都在**登录节点**执行；脚本里每一行都有英文注释。
+
+**先把一切放到 `~/scratch`**：家目录（`$HOME`）配额只有几个 GB，光 torch 解开就 ~3 GB，训练的
+replay buffer 和 checkpoint 更是几十 GB —— 装在家目录一定会在中途报
+`[Errno 122] Disk quota exceeded`，而且如果是重装，旧 torch 已经被卸掉了，环境就此报废。
+`~/scratch` 有 ~1 TB，所以代码、conda 环境、conda 包缓存、pip 缓存、临时目录全部放那里：
+
+```bash
+mv ~/splendor ~/scratch/splendor        # 代码搬过去（已经在 scratch 就跳过）
+cd ~/scratch/splendor
+```
+
+`nscc_setup.sh` 现在会自动检测 `~/scratch`：环境建在 `~/scratch/conda-envs/splendor`，
+`CONDA_PKGS_DIRS` / `PIP_CACHE_DIR` / `TMPDIR` 也都指到 scratch，家目录一个字节都不会被写满。
+要放到别的地方就 `ENV_PREFIX=/path/to/env bash splendor_ai/scripts/nscc_setup.sh`。
 
 **先记下你的项目代码（project code）**：ASPIRE 2A 的每个作业都要记账到一个项目，`qsub` 不带 `-P` 会被直接拒绝。
 个人配额一般是 `personal-<nusnetid>`，以 NSCC 开通邮件为准（也可以 `qstat -Qf` / 问 helpdesk 确认）。
@@ -118,7 +140,44 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
    bash splendor_ai/scripts/nscc_setup.sh
    ```
 
-   它会 `module load anaconda` → 建 conda 环境 `splendor`（Python 3.11）→ `pip install -r splendor_ai/requirements.txt`
+   **CUDA 版本必须对上驱动**：PyPI 上 torch 的默认 wheel 现在是 CUDA 13 版，而 ASPIRE 2A 的驱动是 CUDA 12.8，
+   装错了 `torch.cuda.is_available()` 在计算节点上也是 False，训练会悄悄退化成 CPU。脚本已改为默认从
+   cu128 源装 torch；驱动版本用 `nvidia-smi` 右上角确认，要换源就 `TORCH_INDEX=... bash ...nscc_setup.sh`。
+   已经装错、或者装到一半被家目录配额打断（环境已经坏了、`import torch` 报
+   `libtorch_global_deps.so: cannot open shared object file`）的话，**不要在家目录里修**，
+   直接清掉重来，全程走 scratch：
+
+   ```bash
+   module load anaconda
+   eval "$(conda shell.bash hook)"
+   conda deactivate 2>/dev/null
+
+   # 1) 把家目录里坏掉的环境和缓存删干净，腾出配额
+   conda env remove -n splendor -y 2>/dev/null || rm -rf ~/.conda/envs/splendor
+   rm -rf ~/.conda/pkgs ~/.cache/pip
+   du -sh ~/.conda ~/.cache 2>/dev/null      # 确认已经瘦下来
+
+   # 2) 重建在 scratch 上（脚本会自己这么做，这里是手动版）
+   mkdir -p ~/scratch/{conda-envs,conda-pkgs,pip-cache,tmp}
+   export CONDA_PKGS_DIRS=~/scratch/conda-pkgs
+   export PIP_CACHE_DIR=~/scratch/pip-cache
+   export TMPDIR=~/scratch/tmp
+   conda create -y -p ~/scratch/conda-envs/splendor python=3.11
+   conda activate ~/scratch/conda-envs/splendor
+   pip install --upgrade pip
+   pip install torch --index-url https://download.pytorch.org/whl/cu128
+   pip install -r ~/scratch/splendor/splendor_ai/requirements.txt
+   ```
+
+   环境建在路径上（`-p`）之后，激活和提交作业都用这个路径代替名字：
+   `conda activate ~/scratch/conda-envs/splendor`、`qsub -v ENV_NAME=$HOME/scratch/conda-envs/splendor,...`
+   （PBS 里不要用 `~`，用 `$HOME`）。
+
+   装完**必须在 GPU 节点上验一次**（登录节点没卡验不出来）：
+   `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"` → 要看到 `True 4`。
+
+   它会 `module load anaconda` → 在 `~/scratch/conda-envs/splendor` 建环境（Python 3.11）→ 先从 cu128 源装 torch
+   → `pip install -r splendor_ai/requirements.txt`
    （Linux 上 PyPI 的 torch 自带 CUDA）→ 打印版本 → 做一次导入自检。登录节点上 `torch.cuda.is_available()` 为 False 是正常的。
 
    **新开的登录 shell 里 `conda activate` 用不了**（报 "Your shell has not been properly configured"）：
@@ -129,19 +188,19 @@ worker 是一个 socket.io **客户端**：它主动出站连接 Render，不需
    module load anaconda
    conda init bash
    source ~/.bashrc                       # 或者重新登录一次
-   conda activate splendor
+   conda activate ~/scratch/conda-envs/splendor
 
    # 做法 2（不改 ~/.bashrc，每个 shell 里临时启用）
    module load anaconda
    eval "$(conda shell.bash hook)"
-   conda activate splendor
+   conda activate ~/scratch/conda-envs/splendor
    ```
 
    PBS 脚本里不需要这一步：`nscc_train.pbs` / `nscc_eval.pbs` 自己 `source` 了
    `$(conda info --base)/etc/profile.d/conda.sh`。
 
    建议再跑一遍单元测试：
-   `conda activate splendor && python -m pytest splendor_ai/tests -q -x --ignore=splendor_ai/tests/test_worker_e2e.py`。
+   `conda activate ~/scratch/conda-envs/splendor && python -m pytest splendor_ai/tests -q -x --ignore=splendor_ai/tests/test_worker_e2e.py`。
 
 2. 先做一次短的吞吐/连通性作业（也是 G4 门槛）：
 

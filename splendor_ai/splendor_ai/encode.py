@@ -242,7 +242,7 @@ _LAYOUT_INDEX = {None: 0, "ADJACENT": 1, "OPPOSITE": 2}
 _THRESHOLD_INDIVIDUAL = 15.0
 _THRESHOLD_TEAM = 30.0
 _THRESHOLD_SOLO = 15.0
-_THRESHOLD_DUO = 34.0
+_THRESHOLD_DUO = 33.0
 
 _PAD_CARD: Tuple[Tuple[int, ...], ...] = tuple(
     (EMPTY_CARD,) * i for i in range(MAX_BOARD_SLOTS + 1))
@@ -534,8 +534,10 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
     card_ids = array("h")
     tile_ids = array("h")
     pvec = array("h")               # per seat: gems[6] + discount[5]
-    pscal = array("h")              # per seat: score, cards, reserved, tiles,
-    #                                 resigned, team_id + 1 (0 = none)
+    pscal = array("h")              # per seat: score x 2, cards, reserved,
+    #                                 tiles, resigned, team_id + 1 (0 = none)
+    #  score is DOUBLED so a four-player half-point (a noble is worth 1.5
+    #  there) survives the integer buffer; the unpacking halves it again.
     gvec = array("h")               # 19 per state, see the unpacking below
     tableaus = array("h")
     tableau_len = []
@@ -561,7 +563,7 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
             p = players[who]
             pvec.extend(p.gems)
             pvec.extend(p.discount)
-            pscal.extend((p.score, len(p.cards), len(p.reserved), len(p.tiles),
+            pscal.extend((int(p.score * 2), len(p.cards), len(p.reserved), len(p.tiles),
                           1 if who in resigned else 0,
                           0 if p.team_id is None else p.team_id + 1))
         before = len(tableaus)
@@ -623,7 +625,7 @@ def encode_batch(states: Sequence[GameState], seats: Sequence[int],
     pb[:, :, 0:5] = pv[:, :, 0:5] / tpc[:, :, None]
     pb[:, :, 5] = pv[:, :, 5] / wild
     pb[:, :, 6:11] = np.minimum(pv[:, :, 6:11] / 7.0, 1.0)
-    score = ps[:, :, 0]
+    score = ps[:, :, 0] * 0.5       # packed doubled, see `pscal` above
     pb[:, :, 11] = np.minimum(score / 15.0, 1.0)
     pb[:, :, 12] = np.minimum(ps[:, :, 1] / 20.0, 1.0)
     pb[:, :, 13] = ps[:, :, 2] / 3.0

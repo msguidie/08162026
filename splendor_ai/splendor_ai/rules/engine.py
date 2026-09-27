@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .cards import (
     CARD_COST, CARD_COST_NZ, CARD_POINTS, CARD_REWARD, CARD_TIER,
-    CARDS_BY_TIER, TILE_POINTS, TILE_REQ,
+    CARDS_BY_TIER, TILE_REQ,
 )
 from .actions import (
     ACTION_RESIGN, ACTION_TIMEOUT, BUY_BOARD_START, BUY_RESERVED_START,
@@ -60,7 +60,29 @@ TA_BUY = "BUY"
 
 # ── config (createInitialGameState) ───────────────────────────────────────
 
-def make_config(num_players: int) -> Dict[str, int]:
+def _unhalve(doubled: int) -> float:
+    """``6 -> 3`` (int), ``7 -> 3.5`` (float) -- the inverse of the packing.
+
+    Whole scores come back as ``int`` so a 2p/3p state round-trips to exactly
+    the value it had, and JSON from this engine keeps matching the server's.
+    """
+    return doubled // 2 if doubled % 2 == 0 else doubled / 2
+
+
+def tile_points_for(num_players: int) -> float:
+    """``gameLogic.tilePointsFor``: 3 at two players, 2 at three, 1.5 at four.
+
+    An ``int`` for 2p/3p and a ``float`` for 4p, exactly like the JavaScript,
+    so scores stay whole numbers everywhere except four-player games (2v2
+    included), where they are half-integers -- exact in binary floating point,
+    so every comparison and every sum below is still exact.
+    """
+    if num_players <= 2:
+        return 3
+    return 2 if num_players == 3 else 1.5
+
+
+def make_config(num_players: int) -> Dict[str, Any]:
     return {
         "tokensPerColor": 4 if num_players <= 2 else (5 if num_players == 3 else 7),
         "wildTokens": 5,
@@ -70,6 +92,7 @@ def make_config(num_players: int) -> Dict[str, int]:
         "maxReserved": 3,
         "winThreshold": 15,
         "take2MinStack": 4,
+        "tilePoints": tile_points_for(num_players),
     }
 
 
@@ -90,7 +113,8 @@ class PlayerState:
         # from the board (public knowledge), False when taken from a deck.
         self.reserved_public: List[bool] = []
         self.tiles: List[int] = []
-        self.score: int = 0
+        #: Whole in 2p/3p, a half-integer in 4p (a noble is worth 1.5 there).
+        self.score: float = 0
         self.discount: List[int] = [0, 0, 0, 0, 0]
         self.team_id: Optional[int] = team_id
         self.username: str = username
@@ -301,7 +325,8 @@ class GameState:
         for p in self.players:
             b.extend(p.gems)
             b.extend(p.discount)
-            score = p.score
+            # Doubled, so a 4p half-point survives the two-byte field.
+            score = int(p.score * 2)
             ap((score >> 8) & 0xFF)
             ap(score & 0xFF)
             ap(255 if p.team_id is None else p.team_id)
@@ -400,7 +425,7 @@ class GameState:
             i += 6
             p.discount = list(buf[i:i + 5])
             i += 5
-            p.score = (buf[i] << 8) | buf[i + 1]
+            p.score = _unhalve((buf[i] << 8) | buf[i + 1])
             i += 2
             team_id = buf[i]
             i += 1
@@ -774,7 +799,7 @@ def qualifying_team_ids(state: GameState) -> List[int]:
         out = []
         if t0 >= 15:
             out.append(0)
-        if t1 >= 34:
+        if t1 >= 33:
             out.append(1)
         return out
     out = []
@@ -804,7 +829,7 @@ def resolve_one_vs_two_winners(state: GameState) -> List[int]:
     if solo is None or duo is None:
         return []
     solo_ok = solo["total"] >= 15
-    duo_ok = duo["total"] >= 34
+    duo_ok = duo["total"] >= 33
     if solo_ok and not duo_ok:
         return [0]
     if duo_ok and not solo_ok:
@@ -812,7 +837,7 @@ def resolve_one_vs_two_winners(state: GameState) -> List[int]:
     if not solo_ok and not duo_ok:
         return []
     solo_excess = solo["total"] - 15
-    duo_excess = duo["total"] - 34
+    duo_excess = duo["total"] - 33
     if solo_excess == duo_excess:
         return [0, 1]
     return [0 if solo_excess > duo_excess else 1]
@@ -892,7 +917,7 @@ def advance_turn(state: GameState) -> None:
         tile = qualified[0]
         state.tiles = [t for t in state.tiles if t != tile]
         player.tiles.append(tile)
-        player.score += TILE_POINTS[tile]
+        player.score += state.config["tilePoints"]
         state.tile_claimed = {"tileId": tile, "playerIndex": state.current_player}
         finish_turn(state)
     elif n > 1:
@@ -1269,7 +1294,7 @@ def apply(state: GameState, action_index: int) -> Dict[str, Any]:
             raise IllegalAction("Not qualified")
         state.tiles.pop(slot)
         player.tiles.append(tile)
-        player.score += TILE_POINTS[tile]
+        player.score += state.config["tilePoints"]
         event = {"type": "CHOOSE_TILE", "actingPlayer": idx,
                  "payload": {"tileId": tile, "playerIndex": idx}}
         # NOTE: finishTurn, not advanceTurn — a second qualifying noble is NOT

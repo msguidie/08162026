@@ -1,0 +1,140 @@
+# A two-hour 1v1 sprint on one NSCC `ai` node (4x A100-40GB + 64 cores).
+#
+# Same layout as nscc_4xa100.yaml (GPU 0 learner, GPU 1-3 inference servers,
+# 56 CPU actors) with every knob moved from "118-hour run" to "one sitting":
+#
+#   * 2p only, no curriculum -- the mixture is ind2 from the first game.
+#   * cheaper search (256/64 sims instead of 600/120): in two hours the number
+#     of games dominates the quality of each move, and the policy target still
+#     comes from 256 visits, which is well above the level where forced
+#     playouts eat the budget (that failure was at 48).
+#   * a smaller net (512x8, ~5.5M) that the learner can push through many more
+#     optimiser steps in the same wall clock.
+#   * a short replay window (3 -> 10) so stale games leave the buffer quickly;
+#     the replay buffer is NOT checkpointed (a 2h run has nothing to resume).
+#   * generations of 5,000 games so evaluation lands every few minutes.
+#
+# It trains ind2 ONLY.  For 1v2 / 2v2 use nscc_4xa100.yaml -- those modes need
+# the full curriculum, not a sprint.
+#
+#   python -m splendor_ai.selfplay.train \
+#       --config splendor_ai/configs/nscc_2h_1v1.yaml \
+#       --warm-start runs/bootstrap.pt        # optional, see README "Bootstrap"
+run_dir: runs/sprint2h
+seed: 20260908
+
+net:
+  width: 512
+  blocks: 8                  # ~5.5M parameters
+
+search_full:                 # 25% of moves, recorded
+  sims: 256
+  universes: 4
+  noise: true
+  dirichlet_alpha_scale: 10.0
+  noise_eps: 0.25
+  forced_playouts_k: 1.0     # halved: 256 sims is a smaller budget to share
+  prune_policy_target: true
+  c_puct: 1.5
+  fpu_reduction: 0.25
+  root: puct
+  gumbel_m: 16
+  deck_reserve_penalty: [0.02, 0.06, 0.12]
+  max_depth: 200
+
+search_fast:                 # 75% of moves, not recorded
+  sims: 64
+  universes: 3
+  noise: false
+  forced_playouts_k: 0.0
+  prune_policy_target: false
+  c_puct: 1.5
+  max_depth: 200
+
+selfplay:
+  actors: 56
+  games_per_actor: 24
+  pcr_full_prob: 0.25
+  temperature_plies: 12
+  temperature: 1.0
+  max_plies: 400
+  truncation_z_weight: 0.3
+  win_threshold: null        # the real rules; NEVER override for a real run
+  augment_rotations: 5
+  mixed_game_frac: 0.25
+  # More self-play against the current net than the 118-hour config: with only
+  # a couple of dozen generations there is barely a historical pool to draw
+  # from, and the anchors are there to stop an early collapse, not to teach.
+  opponent_weights: {latest: 0.40, historical: 0.40, anchor: 0.20}
+  historical_pool_size: 16
+  historical_cache: 3
+  historical_pool_refresh_s: 60.0
+  historical_reuse_prob: 0.85
+  stats_every_s: 30.0
+  weight_refresh_s: 30.0     # halved: weights move fast in a sprint
+  progress_refresh_s: 30.0
+  ship_every_games: 4
+  stop_grace_s: 60.0
+  restart_budget: 8
+  restart_window_s: 900.0
+  restart_backoff_s: 2.0
+  restart_backoff_max_s: 120.0
+  mode_mixture: {ind2: 1.0}
+  phases:
+    - until_games: null      # no curriculum: 2p at full budget from game 1
+      mixture: {ind2: 1.0}
+
+replay:
+  window_start: 3
+  window_end: 10
+  window_ramp_generations: 20
+  max_samples: 12000000      # ~5 GiB at 414 B/record
+  min_samples: 60000         # first learner step after ~1 generation
+  checkpoint: false          # nothing to resume in a 2h run; saves the I/O
+  checkpoint_async: true
+
+learner:
+  algorithm: az
+  device: cuda:0
+  batch: 3072
+  lr: 3.0e-4
+  lr_final: 5.0e-5
+  warmup_steps: 500
+  cosine_steps: 12000        # the whole sprint, not a 118-hour schedule
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  replay_ratio: 6.0
+  publish_every: 100         # fresh weights to the actors roughly every minute
+  checkpoint_every_s: 300.0
+  bf16: true
+  value_blend: 0.5
+  log_every: 25
+  prefetch: true
+  ddp: false
+  checkpoint_retention: true
+
+inference:
+  mode: server
+  devices: [cuda:1, cuda:2, cuda:3]
+  max_batch: 1024
+  max_wait_ms: 1.0
+  reload_every_s: 30.0
+  queue_size: 512
+
+eval:
+  enabled: true
+  every_generations: 5
+  pairs: 60
+  search_pairs: 12
+  sims_eval: 200
+  opponents: [random, greedy]
+  search_bot: true
+  async_process: true
+  # Unlike the chained production run, this one ends for good when it ends:
+  # spend two minutes on a final measurement so the sprint has a verdict.
+  final_eval_seconds: 120.0
+
+games_per_generation: 5000
+max_seconds: 7200            # two hours, wall clock
+torch_threads: 1
+learner_threads: 8
