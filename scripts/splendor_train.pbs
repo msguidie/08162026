@@ -45,7 +45,13 @@ cd $HOME/scratch/splendor || exit 2
 RUN_DIR=$HOME/scratch/splendor/runs/$NAME
 LOG=$RUN_DIR/metrics.jsonl
 DONE=$RUN_DIR/DONE
-mkdir -p "$RUN_DIR"
+mkdir -p "$RUN_DIR" "$RUN_DIR/logs"
+# PBS keeps a job's stdout on the compute node and only copies it back when the
+# job ends, so `splendor.o<jobid>` cannot be tailed while the run is alive.
+# Keep our own copy on scratch, where it is readable from the login node.
+SLOT_LOG=$RUN_DIR/logs/slot.${PBS_JOBID:-manual}.log
+exec > >(tee -a "$SLOT_LOG") 2>&1
+echo "live log: $SLOT_LOG"
 if [ -f "$DONE" ]; then echo "already done:"; cat "$DONE"; exit 0; fi
 if [ -f "$RUN_DIR/STOP" ]; then echo "STOP present — chain ends here"; exit 0; fi
 

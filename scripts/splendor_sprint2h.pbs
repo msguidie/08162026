@@ -51,7 +51,13 @@ LOG=$RUN_DIR/metrics.jsonl
 # The marker carries the budget it was reached at, so bumping TOTAL_MINUTES
 # un-blocks the run instead of needing the file deleted by hand.
 DONE=$RUN_DIR/DONE.${TOTAL_MINUTES}m
-mkdir -p "$RUN_DIR"
+mkdir -p "$RUN_DIR" "$RUN_DIR/logs"
+# PBS keeps a job's stdout on the compute node and only copies it back when the
+# job ends, so `splendor.o<jobid>` cannot be tailed while the run is alive.
+# Keep our own copy on scratch, where it is readable from the login node.
+SLOT_LOG=$RUN_DIR/logs/slot.${PBS_JOBID:-manual}.log
+exec > >(tee -a "$SLOT_LOG") 2>&1
+echo "live log: $SLOT_LOG"
 if [ -f "$DONE" ]; then echo "already done at ${TOTAL_MINUTES}min:"; cat "$DONE"; exit 0; fi
 
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
