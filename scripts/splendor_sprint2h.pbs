@@ -1,0 +1,127 @@
+#!/bin/bash
+#PBS -N splendor2h
+#PBS -P 13004357
+#PBS -q normal
+#PBS -l select=1:ngpus=4
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#
+# Splendor — the 1v1 sprint (configs/nscc_2h_1v1.yaml), resumable.
+#
+# Same node layout as the long run (GPU0 learner, GPU1-3 inference servers, the
+# rest of the cores on actors, no torchrun), but 2p-only with no curriculum,
+# 256/64 sims and a 512x8 net: a model worth looking at after one sitting.
+# Its own RUN_DIR, no chaining -- it never touches the 118 h run.
+#
+# Budget arithmetic for a 2 h walltime: ~2 min startup + ~4 min bootstrap +
+# TOTAL_MINUTES of self-play + 2 min final evaluation + ~1 min checkpoint.
+# 102 minutes of self-play leaves 9 minutes of slack.  Minutes, not hours,
+# because bash arithmetic is integer-only and 1.7 would silently misparse.
+#
+# TOTAL_MINUTES is the WHOLE RUN's budget, not this slot's: it is restored from
+# the checkpoint.  Submitting again resumes from trainer_state.pt and carries on
+# until the budget is spent.  To train longer than first planned, RAISE
+# TOTAL_MINUTES and submit again -- leaving it as it is makes a resumed slot
+# exit at once with "budget spent", which looks like a crash and is not one.
+#
+#   submit:   cd ~/scratch/splendor && qsub scripts/splendor_sprint2h.pbs
+#   watch:    scripts/splendor_progress.sh sprint2h
+
+NAME=sprint2h
+CONFIG=splendor_ai/configs/nscc_2h_1v1.yaml
+TOTAL_MINUTES=102                             # whole-run budget; raise to extend
+SLOT_MINUTES=108                              # backstop for THIS slot
+BOOTSTRAP=1                                   # 0 = skip the MCTS teacher
+ENV_PREFIX=$HOME/scratch/conda-envs/splendor
+
+set -o pipefail
+
+if ! command -v module >/dev/null 2>&1; then
+    for f in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        [ -r "$f" ] && . "$f" && break
+    done
+fi
+module load anaconda 2>/dev/null || module load miniforge3 2>/dev/null || true
+eval "$(conda shell.bash hook)" || exit 2
+conda activate "$ENV_PREFIX" || exit 2
+cd $HOME/scratch/splendor || exit 2
+
+RUN_DIR=$HOME/scratch/splendor/runs/$NAME
+LOG=$RUN_DIR/metrics.jsonl
+# The marker carries the budget it was reached at, so bumping TOTAL_MINUTES
+# un-blocks the run instead of needing the file deleted by hand.
+DONE=$RUN_DIR/DONE.${TOTAL_MINUTES}m
+mkdir -p "$RUN_DIR"
+if [ -f "$DONE" ]; then echo "already done at ${TOTAL_MINUTES}min:"; cat "$DONE"; exit 0; fi
+
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+export PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2
+export TORCHINDUCTOR_CACHE_DIR=$RUN_DIR/.torch_cache
+export TRITON_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR/triton
+
+echo "=== $(date)  job=${PBS_JOBID:-none}  host=$(hostname)  $NAME  budget=${TOTAL_MINUTES}min"
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+
+# `select=1:ngpus=4` asks for no core count, so take what PBS gave us and leave
+# 8 cores for the learner, the three inference servers and the OS.
+CORES=$(nproc)
+ACTORS=$((CORES - 8))
+[ "$ACTORS" -lt 4 ] && ACTORS=4
+echo "cores visible: $CORES  ->  selfplay.actors=$ACTORS"
+
+# --- resume or start fresh ----------------------------------------------
+# One file decides: trainer_state.pt (model + optimiser + counters + RNG).
+RESUME=""
+if [ -f "$RUN_DIR/trainer_state.pt" ]; then
+    RESUME="--resume $RUN_DIR"
+    echo "--- resuming: $(du -h "$RUN_DIR/trainer_state.pt" | cut -f1) state, $(ls -1 "$RUN_DIR"/checkpoints 2>/dev/null | wc -l) generation checkpoints"
+    [ -f "$RUN_DIR/replay.npz" ] && echo "    replay buffer $(du -h "$RUN_DIR/replay.npz" | cut -f1)"
+else
+    echo "--- fresh run"
+fi
+
+# --- optional warm start (fresh runs only) -------------------------------
+# An NN-free MCTS teacher, ~4 min, so the first self-play games are not played
+# by a random network.  The trainer ignores --warm-start when resuming (step >
+# 0), and a failure here is not fatal: the run starts from a random net instead.
+WARM=""
+BOOT=$RUN_DIR/bootstrap.pt
+if [ "$BOOTSTRAP" = "1" ] && [ -z "$RESUME" ] && [ ! -f "$BOOT" ]; then
+    echo "--- bootstrap (MCTS teacher -> supervised pre-train)"
+    python -m splendor_ai.selfplay.bootstrap --config "$CONFIG" \
+        --set run_dir="$RUN_DIR" --games 120 --sims 96 --steps 2000 --out "$BOOT" \
+        || echo "bootstrap failed — starting from a random net instead"
+fi
+[ -f "$BOOT" ] && WARM="--warm-start $BOOT"
+
+# --- train ---------------------------------------------------------------
+#   max_seconds          the whole run's budget, restored from the checkpoint
+#   replay.checkpoint    keep the buffer so a resume does not refill from zero
+#                        (~5 GiB on scratch; a one-shot run has it off)
+#   learner.cosine_steps stretch the LR schedule with the budget (~100 steps per
+#                        minute), or everything past the first slot trains at
+#                        the floor learning rate
+timeout --signal=INT --kill-after=5m "${SLOT_MINUTES}m" \
+    python -m splendor_ai.selfplay.train \
+        --config "$CONFIG" $RESUME $WARM \
+        --set run_dir="$RUN_DIR" \
+        --set selfplay.actors=$ACTORS \
+        --set max_seconds=$((TOTAL_MINUTES * 60)) \
+        --set replay.checkpoint=true \
+        --set learner.cosine_steps=$((TOTAL_MINUTES * 100))
+rc=$?
+echo "=== trainer exit=$rc  $(date)"
+
+#   0  = the ${TOTAL_MINUTES}min budget is spent -> finished
+# 124  = this slot ran out -> submit again to continue
+if [ "$rc" -eq 0 ]; then
+    grep '"kind": "summary"' "$LOG" | tail -1 > "$DONE"
+    echo "DONE:"; cat "$DONE"
+elif [ "$rc" -eq 124 ]; then
+    echo "slot full — submit the script again to continue from trainer_state.pt"
+fi
+echo "--- last evaluations"
+grep '"kind": "eval"' "$LOG" 2>/dev/null | tail -3
+echo "--- weights for the worker: $RUN_DIR/weights/latest.pt"
+exit "$rc"

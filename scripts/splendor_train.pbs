@@ -1,0 +1,119 @@
+#!/bin/bash
+#PBS -N splendor
+#PBS -P 13004357
+#PBS -q normal
+#PBS -l select=1:ngpus=4
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#
+# Splendor AlphaZero self-play — the full five-mode run, in 24 h slots that
+# chain themselves (configs/nscc_4xa100.yaml, a 118 h self-play budget).
+#
+# One node: GPU0 learner, GPU1-3 batched inference servers, the rest of the
+# cores running self-play actors.  DDP is deliberately NOT used -- a 12.6M
+# parameter MLP is >15x oversupplied by one A100 -- so this is ONE python
+# process plus its children, and there is no torchrun.
+#
+# Each slot queues its successor FIRST (-W depend=afterany), so a slot killed
+# by the walltime still continues the run.  The successor stops the chain if
+# the previous slot made no progress, and is cancelled once the run is DONE.
+#
+#   submit:   cd ~/scratch/splendor && qsub scripts/splendor_train.pbs
+#   stop:     touch ~/scratch/splendor/runs/nscc0/STOP   (after the current slot)
+#   watch:    scripts/splendor_progress.sh nscc0
+
+NAME=nscc0
+CONFIG=splendor_ai/configs/nscc_4xa100.yaml   # 118 h, all five modes
+MAX_HOURS=23.5                                # train stops before PBS's axe
+MAX_CHAIN=6
+SELF=$HOME/scratch/splendor/scripts/splendor_train.pbs
+ENV_PREFIX=$HOME/scratch/conda-envs/splendor
+
+set -o pipefail
+
+# --- environment ---------------------------------------------------------
+if ! command -v module >/dev/null 2>&1; then
+    for f in /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        [ -r "$f" ] && . "$f" && break
+    done
+fi
+module load anaconda 2>/dev/null || module load miniforge3 2>/dev/null || true
+eval "$(conda shell.bash hook)" || exit 2
+conda activate "$ENV_PREFIX" || exit 2
+cd $HOME/scratch/splendor || exit 2
+
+RUN_DIR=$HOME/scratch/splendor/runs/$NAME
+LOG=$RUN_DIR/metrics.jsonl
+DONE=$RUN_DIR/DONE
+mkdir -p "$RUN_DIR"
+if [ -f "$DONE" ]; then echo "already done:"; cat "$DONE"; exit 0; fi
+if [ -f "$RUN_DIR/STOP" ]; then echo "STOP present — chain ends here"; exit 0; fi
+
+# One thread per process: 50-odd actors each spinning up a BLAS pool the width
+# of the node is the classic way to run a correct pipeline at a fraction of its
+# speed, with no error message anywhere.
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+export PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2
+export TORCHINDUCTOR_CACHE_DIR=$RUN_DIR/.torch_cache
+export TRITON_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR/triton
+
+# --- chain bookkeeping ---------------------------------------------------
+CHAIN_FILE=$RUN_DIR/.chain_count
+SEEN_FILE=$RUN_DIR/.chain_seen
+chain=$(cat "$CHAIN_FILE" 2>/dev/null || echo 0)
+n_gen() { if [ -f "$LOG" ]; then grep -c '"kind": "generation"' "$LOG"; else echo 0; fi; }
+n_ck()  { ls "$RUN_DIR"/checkpoints/*.pt 2>/dev/null | wc -l; }
+now="$(n_gen) $(n_ck)"
+echo "=== $(date)  job=${PBS_JOBID:-none}  host=$(hostname)  chain=$chain/$MAX_CHAIN  generations,checkpoints=$now"
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+if [ "$(cat "$SEEN_FILE" 2>/dev/null)" = "$now" ]; then
+    echo "NO PROGRESS in the previous slot — chain stopped; read its log"
+    exit 1
+fi
+echo "$now" > "$SEEN_FILE"
+next=""
+if [ "$chain" -lt "$MAX_CHAIN" ]; then
+    echo $((chain + 1)) > "$CHAIN_FILE"
+    next=$(qsub -W depend=afterany:"$PBS_JOBID" "$SELF") && echo "queued successor $next"
+fi
+
+# --- actors follow the cores PBS actually gave us -------------------------
+# `select=1:ngpus=4` does not ask for a core count, so the config's 56 actors
+# are a guess.  Leave 8 cores for the learner, the three inference servers and
+# the OS, and give the rest to actors -- oversubscribing them costs more than
+# the extra parallelism is worth.
+CORES=$(nproc)
+ACTORS=$((CORES - 8))
+[ "$ACTORS" -lt 4 ] && ACTORS=4
+echo "cores visible: $CORES  ->  selfplay.actors=$ACTORS"
+
+# --- train ---------------------------------------------------------------
+# --resume only when there is state to resume FROM.  `timeout --signal=INT`
+# sends the trainer the same signal as Ctrl-C a little before the walltime, so
+# it drains the record queue and writes weights + checkpoint before exiting.
+RESUME=""
+[ -f "$RUN_DIR/trainer_state.pt" ] && RESUME="--resume $RUN_DIR"
+timeout --signal=INT --kill-after=10m "${MAX_HOURS}h" \
+    python -m splendor_ai.selfplay.train \
+        --config "$CONFIG" $RESUME \
+        --set run_dir="$RUN_DIR" \
+        --set selfplay.actors=$ACTORS
+rc=$?
+echo "=== trainer exit=$rc  $(date)  generations,checkpoints $now -> $(n_gen) $(n_ck)"
+
+#   0  = the run spent its whole budget (config max_seconds) -> finished
+# 124  = this slot hit MAX_HOURS -> the successor carries on
+# else = a real failure -> cancel the successor instead of looping on it
+if [ "$rc" -eq 0 ]; then
+    grep '"kind": "summary"' "$LOG" | tail -1 > "$DONE"
+    [ -n "$next" ] && qdel "$next"
+    rm -f "$CHAIN_FILE" "$SEEN_FILE"
+    echo "DONE:"; cat "$DONE"
+    exit 0
+fi
+if [ "$rc" -ne 124 ]; then
+    [ -n "$next" ] && qdel "$next"
+    echo "FAILED (exit $rc) — successor cancelled"
+fi
+exit "$rc"
