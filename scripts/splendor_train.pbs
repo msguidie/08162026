@@ -83,7 +83,10 @@ fi
 # are a guess.  Leave 8 cores for the learner, the three inference servers and
 # the OS, and give the rest to actors -- oversubscribing them costs more than
 # the extra parallelism is worth.
-CORES=$(nproc)
+# GNU nproc honours OMP_NUM_THREADS (exported above as 1), so `nproc` would
+# say 1 here -- that is how the first long run started with 4 actors.  Ask
+# the affinity mask instead.
+CORES=$(python -c 'import os; print(len(os.sched_getaffinity(0)))')
 ACTORS=$((CORES - 8))
 [ "$ACTORS" -lt 4 ] && ACTORS=4
 echo "cores visible: $CORES  ->  selfplay.actors=$ACTORS"

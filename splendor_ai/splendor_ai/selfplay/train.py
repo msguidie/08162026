@@ -159,6 +159,8 @@ class Trainer:
         self.t0 = time.monotonic()
         self.last_checkpoint = self.t0
         self.last_stat_log = self.t0
+        #: the most recent `train_step` metrics, for the 30 s console line
+        self._last_learner: Optional[Dict[str, float]] = None
         self.actor_stats: Dict[int, Dict[str, Any]] = {}
         self.eval_history: List[Dict[str, Any]] = []
         self.pending_evals = 0
@@ -758,6 +760,7 @@ class Trainer:
                             self.learner.local_batch,
                             value_blend=cfg.learner.value_blend)
                     metrics = self.learner.train_step(batch)
+                    self._last_learner = metrics
                     stepped = True
                     if (self.learner.step % max(1, cfg.learner.publish_every)) == 0:
                         self.learner.publish()
@@ -857,6 +860,18 @@ class Trainer:
               f" trunc {agg.get('truncation_rate', 0.0):.3f}"
               f" | window {self.replay.retained_generations()}/"
               f"{self.replay.window_size()} gens", flush=True)
+        m = self._last_learner
+        if m:
+            # The loss alone says little in self-play (the target distribution
+            # moves with the player); these say whether the net is learning.
+            print(f"[train]   learner policy-loss {m.get('policy', 0.0):.3f}"
+                  f" value-loss {m.get('value', 0.0):.3f}"
+                  f" | value-ev {m.get('value_explained_variance', 0.0):.3f}"
+                  f" top1 {m.get('policy_top1_agreement', 0.0):.3f}"
+                  f" entropy {m.get('policy_entropy', 0.0):.2f}"
+                  f"/{m.get('target_entropy', 0.0):.2f}"
+                  f" lr {m.get('lr', 0.0):.1e}"
+                  f" steps/s {tp.get('steps_per_s', 0.0):.2f}", flush=True)
         self._write_progress()
 
     # -- shutdown --------------------------------------------------------
