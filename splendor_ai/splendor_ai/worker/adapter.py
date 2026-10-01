@@ -271,7 +271,7 @@ def hydrate(payload: Mapping[str, Any],
     state.num_players = num_players
     state.mode = mode
     state.team_layout = layout
-    state.config = _config_of(view, num_players, validate)
+    state.config = _config_of(view, num_players, mode, validate)
     cfg = state.config
 
     # -- board ----------------------------------------------------------
@@ -464,10 +464,10 @@ def hydrate(payload: Mapping[str, Any],
     return state, seat
 
 
-def _config_of(view: Mapping[str, Any], num_players: int,
+def _config_of(view: Mapping[str, Any], num_players: int, mode: str,
                validate: bool) -> Dict[str, Any]:
     """The payload's config, defaulted from ``make_config`` per key."""
-    default = E.make_config(num_players)
+    default = E.make_config(num_players, mode)
     raw = view.get("config")
     if not isinstance(raw, Mapping):
         return default
@@ -475,8 +475,8 @@ def _config_of(view: Mapping[str, Any], num_players: int,
     for key, value in raw.items():
         if key in out and isinstance(value, (int, float)) \
                 and not isinstance(value, bool):
-            # tilePoints is the one key that is not a whole number (1.5 at
-            # four players); int() would silently turn a noble into 1 point.
+            # tilePoints is the one key that is not a whole number (1.5 in a
+            # four-player individual game); int() would turn a noble into 1.
             out[key] = float(value) if key == "tilePoints" else int(value)
     if validate and out["maxReserved"] != default["maxReserved"]:
         raise HydrationError(
@@ -485,7 +485,7 @@ def _config_of(view: Mapping[str, Any], num_players: int,
     if validate and out["tilePoints"] != default["tilePoints"]:
         raise HydrationError(
             f"config.tilePoints is {out['tilePoints']}, a {num_players}-player "
-            f"game pays {default['tilePoints']} per tile")
+            f"{mode} game pays {default['tilePoints']} per tile")
     return out
 
 

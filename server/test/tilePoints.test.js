@@ -1,12 +1,14 @@
-// Bonus tiles are worth 3 points at two players, 2 at three and 1.5 at four
-// (gameLogic.tilePointsFor).  The value is stamped on every tile when the game
-// is dealt, so scoring, the client and replays all read `tile.points`.
+// Bonus tiles: individual games reveal n+1 tiles worth 3 / 2 / 1.5 points at
+// 2 / 3 / 4 players; the team modes (1v2, 2v2) reveal three tiles worth 3.
+// The value is stamped on every tile when the game is dealt, so scoring, the
+// client and replays all read `tile.points`.
 
 const { suite, test, assert, assertEqual } = require('./harness');
 const {
   ALL_CARDS,
   ALL_BONUS_TILES,
   tilePointsFor,
+  revealedTilesFor,
   createInitialGameState,
   processAction,
 } = require('../gameLogic');
@@ -19,7 +21,9 @@ function makeGame(n, options = {}) {
     players.push({
       username: `p${i}`,
       avatarSeed: i + 1,
-      ...(options.gameMode && options.gameMode !== 'INDIVIDUAL' ? { teamId: i % 2 } : {}),
+      // 1v2: the solo is seat 0 (team 0), the duo seats 1-2 (team 1)
+      ...(options.gameMode === 'ONE_V_TWO' ? { teamId: i === 0 ? 0 : 1 }
+        : options.gameMode === 'TEAM' ? { teamId: i % 2 } : {}),
     });
   }
   return createInitialGameState(players, { firstPlayerIndex: 0, unlimitedTime: true, ...options });
@@ -50,25 +54,34 @@ function claimOneTile(state) {
 async function run() {
   suite('bonus tile points — by player count');
 
-  await test('tilePointsFor: 3 at two players, 2 at three, 1.5 at four', () => {
+  await test('individual: 3 / 2 / 1.5 points at 2 / 3 / 4 players; 1v2 and 2v2: 3', () => {
     assertEqual(tilePointsFor(2), 3, 'two players');
     assertEqual(tilePointsFor(3), 2, 'three players');
     assertEqual(tilePointsFor(4), 1.5, 'four players');
+    assertEqual(tilePointsFor(3, 'ONE_V_TWO'), 3, '1v2');
+    assertEqual(tilePointsFor(4, 'TEAM'), 3, '2v2');
+    assertEqual(revealedTilesFor(2), 3, 'two players reveal 3');
+    assertEqual(revealedTilesFor(3), 4, 'three players reveal 4');
+    assertEqual(revealedTilesFor(4), 5, 'four players reveal 5');
+    assertEqual(revealedTilesFor(3, 'ONE_V_TWO'), 3, '1v2 reveals 3');
+    assertEqual(revealedTilesFor(4, 'TEAM'), 3, '2v2 reveals 3');
   });
 
   await test('every dealt tile carries the value of its own game', () => {
     const cases = [
-      [makeGame(2), 3, '2p individual'],
-      [makeGame(3), 2, '3p individual'],
-      [makeGame(4), 1.5, '4p individual'],
-      [makeGame(3, { gameMode: 'ONE_V_TWO' }), 2, '1v2'],
-      [makeGame(4, { gameMode: 'TEAM', teamLayout: 'ADJACENT' }), 1.5, '2v2'],
+      [makeGame(2), 3, 3, '2p individual'],
+      [makeGame(3), 2, 4, '3p individual'],
+      [makeGame(4), 1.5, 5, '4p individual'],
+      [makeGame(3, { gameMode: 'ONE_V_TWO' }), 3, 3, '1v2'],
+      [makeGame(4, { gameMode: 'TEAM', teamLayout: 'ADJACENT' }), 3, 3, '2v2 adjacent'],
+      [makeGame(4, { gameMode: 'TEAM', teamLayout: 'OPPOSITE' }), 3, 3, '2v2 opposite'],
     ];
-    for (const [state, expected, label] of cases) {
-      assertEqual(state.config.tilePoints, expected, `${label}: config.tilePoints`);
-      assertEqual(state.bonusTiles.length, state.numPlayers + 1, `${label}: n+1 tiles revealed`);
+    for (const [state, points, count, label] of cases) {
+      assertEqual(state.config.tilePoints, points, `${label}: config.tilePoints`);
+      assertEqual(state.config.revealedTiles, count, `${label}: config.revealedTiles`);
+      assertEqual(state.bonusTiles.length, count, `${label}: tiles revealed`);
       for (const tile of state.bonusTiles) {
-        assertEqual(tile.points, expected, `${label}: tile ${tile.id} value`);
+        assertEqual(tile.points, points, `${label}: tile ${tile.id} value`);
       }
     }
   });
@@ -85,6 +98,14 @@ async function run() {
     const four = makeGame(4);
     claimOneTile(four);
     assertEqual(four.players[0].score, 1.5, 'four players: +1.5');
+
+    const ovt = makeGame(3, { gameMode: 'ONE_V_TWO' });
+    claimOneTile(ovt);
+    assertEqual(ovt.players[0].score, 3, '1v2: +3');
+
+    const team = makeGame(4, { gameMode: 'TEAM', teamLayout: 'ADJACENT' });
+    claimOneTile(team);
+    assertEqual(team.players[0].score, 3, '2v2: +3');
   });
 
   await test('two half tiles add up to a whole score at four players', () => {
@@ -131,12 +152,17 @@ async function run() {
 
   await test('the recorder stores the value its game was dealt', () => {
     const recorder = require('../replayRecorder');
-    for (const [n, expected] of [[2, 3], [3, 2], [4, 1.5]]) {
-      const state = makeGame(n);
-      const room = { id: `room-${n}`, gameState: state, created: 1725280000000,
+    const cases = [
+      [makeGame(2), 3, '2p'], [makeGame(3), 2, '3p'], [makeGame(4), 1.5, '4p'],
+      [makeGame(3, { gameMode: 'ONE_V_TWO' }), 3, '1v2'],
+      [makeGame(4, { gameMode: 'TEAM', teamLayout: 'OPPOSITE' }), 3, '2v2'],
+    ];
+    for (const [state, expected, label] of cases) {
+      const room = { id: `room-${label}`, gameState: state, created: 1725280000000,
                      playerSockets: state.players.map(() => ({})) };
       const recording = recorder.begin(room);
-      assertEqual(recording.setup.tp, expected, `${n}p recorded tile value`);
+      assertEqual(recording.setup.tp, expected, `${label} recorded tile value`);
+      assertEqual(recording.setup.tiles.length, state.config.revealedTiles, `${label} recorded tiles`);
       recorder.discard(room);
     }
   });

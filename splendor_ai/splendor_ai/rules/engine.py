@@ -69,30 +69,37 @@ def _unhalve(doubled: int) -> float:
     return doubled // 2 if doubled % 2 == 0 else doubled / 2
 
 
-def tile_points_for(num_players: int) -> float:
-    """``gameLogic.tilePointsFor``: 3 at two players, 2 at three, 1.5 at four.
+def tile_points_for(num_players: int, mode: str = MODE_INDIVIDUAL) -> float:
+    """``gameLogic.tilePointsFor``: the team modes (1v2, 2v2) pay 3 per tile;
+    individual games pay 3 at two players, 2 at three, 1.5 at four.
 
-    An ``int`` for 2p/3p and a ``float`` for 4p, exactly like the JavaScript,
-    so scores stay whole numbers everywhere except four-player games (2v2
-    included), where they are half-integers -- exact in binary floating point,
-    so every comparison and every sum below is still exact.
+    An ``int`` except for the 1.5, exactly like the JavaScript, so scores stay
+    whole numbers everywhere except four-player individual games, where they
+    are half-integers -- exact in binary floating point, so every comparison
+    and every sum below is still exact.
     """
-    if num_players <= 2:
+    if mode in (MODE_TEAM, MODE_ONE_V_TWO) or num_players <= 2:
         return 3
     return 2 if num_players == 3 else 1.5
 
 
-def make_config(num_players: int) -> Dict[str, Any]:
+def revealed_tiles_for(num_players: int, mode: str = MODE_INDIVIDUAL) -> int:
+    """``gameLogic.revealedTilesFor``: three tiles in the team modes, n+1 in
+    individual games."""
+    return 3 if mode in (MODE_TEAM, MODE_ONE_V_TWO) else num_players + 1
+
+
+def make_config(num_players: int, mode: str = MODE_INDIVIDUAL) -> Dict[str, Any]:
     return {
         "tokensPerColor": 4 if num_players <= 2 else (5 if num_players == 3 else 7),
         "wildTokens": 5,
-        "revealedTiles": num_players + 1,
+        "revealedTiles": revealed_tiles_for(num_players, mode),
         "cardsPerRow": 4,
         "maxTokensInHand": 10,
         "maxReserved": 3,
         "winThreshold": 15,
         "take2MinStack": 4,
-        "tilePoints": tile_points_for(num_players),
+        "tilePoints": tile_points_for(num_players, mode),
     }
 
 
@@ -445,7 +452,7 @@ class GameState:
             i += 1 + buf[i]
             players.append(p)
         s.players = players
-        s.config = make_config(n)
+        s.config = make_config(n, s.mode)
         if s.mode != MODE_INDIVIDUAL:
             s.teams = [
                 {"id": tid,
@@ -529,7 +536,7 @@ def new_game(num_players: int,
     s.num_players = num_players
     s.mode = mode
     s.team_layout = team_layout
-    s.config = make_config(num_players)
+    s.config = make_config(num_players, mode)
     cfg = s.config
 
     if team_ids is None:
@@ -1558,6 +1565,7 @@ def replay(replay_json: Dict[str, Any]) -> GameState:
 
 __all__ = [
     "GameState", "PlayerState", "IllegalAction", "new_game", "make_config",
+    "tile_points_for", "revealed_tiles_for",
     "legal_mask", "legal_mask_np", "legal_actions", "is_stuck", "apply",
     "take_legal_mask",
     "step", "resign", "timeout", "to_protocol", "to_replay_code",

@@ -42,8 +42,8 @@ function cloneCard(id, actionIndex) {
 }
 
 // `points` comes from the game being replayed, not from the catalogue: a tile
-// is worth 3 / 2 / 1.5 depending on the player count (gameLogic.tilePointsFor),
-// and the replay only stores tile ids.
+// is worth 3 / 2 / 1.5 depending on the player count and mode
+// (gameLogic.tilePointsFor), and the replay only stores tile ids.
 function cloneTile(id, actionIndex, points) {
   const tile = tilesById.get(id);
   if (!tile) throw new ReplayCorruptError(actionIndex, `Unknown tile id ${id}`);

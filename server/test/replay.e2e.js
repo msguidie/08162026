@@ -5,6 +5,7 @@
 const net = require('net');
 const { io } = require('socket.io-client');
 const { suite, test, assert, assertEqual } = require('./harness');
+const { revealedTilesFor } = require('../gameLogic');
 
 const ACTION_CODES = ['G', 'R', 'RD', 'B', 'N', 'X', 'T'];
 const ACK_TIMEOUT_MS = 8000;
@@ -358,7 +359,7 @@ function assertRawShape(raw, expected) {
   assert(Number.isInteger(raw.first) && raw.first >= 0 && raw.first < raw.n, 'first player');
   assertEqual(raw.setup.board.map(row => row.length), [4, 4, 4], 'four face-up cards per tier');
   assertEqual(raw.setup.decks.map(deck => deck.length), [36, 26, 16], 'remaining decks');
-  assertEqual(raw.setup.tiles.length, expected.n + 1, 'revealed nobles');
+  assertEqual(raw.setup.tiles.length, revealedTilesFor(expected.n, expected.mode), 'revealed nobles');
   const allIds = [...raw.setup.board.flat(), ...raw.setup.decks.flat()];
   assertEqual(allIds.length, 90, 'every card is accounted for');
   assertEqual(new Set(allIds).size, 90, 'card ids are unique');

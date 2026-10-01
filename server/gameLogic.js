@@ -54,14 +54,25 @@ for (let i = 0; i < 5; i++) {
   ALL_BONUS_TILES.push({ id: tileId++, points: 3, requirement: req });
 }
 
-// A bonus tile is worth less the more players are competing for the same ten
-// tiles: 3 points at two players, 2 at three, 1.5 at four.  Every dealt tile
-// carries the value for ITS game (see createInitialGameState), so scoring,
-// the UI and replays all read `tile.points` and never the catalogue's 3.
-// Four-player games (2v2 included) therefore have half-integer scores; the
-// thresholds (15 / >30 / 33) and every comparison work unchanged on halves.
-function tilePointsFor(numPlayers) {
+// Bonus tiles depend on the table.  Individual games reveal n+1 tiles, and a
+// tile pays less the more players are competing for it: 3 points at two
+// players, 2 at three, 1.5 at four.  The team modes (1v2 and 2v2) reveal three
+// tiles worth 3 points each.  Every dealt tile carries the value for ITS game
+// (see createInitialGameState), so scoring, the UI and replays all read
+// `tile.points` and never the catalogue's 3.  Four-player individual games
+// therefore have half-integer scores; the thresholds and every comparison work
+// unchanged on halves.
+function isTeamMode(gameMode) {
+  return gameMode === 'TEAM' || gameMode === 'ONE_V_TWO';
+}
+
+function tilePointsFor(numPlayers, gameMode = 'INDIVIDUAL') {
+  if (isTeamMode(gameMode)) return 3;
   return numPlayers <= 2 ? 3 : numPlayers === 3 ? 2 : 1.5;
+}
+
+function revealedTilesFor(numPlayers, gameMode = 'INDIVIDUAL') {
+  return isTeamMode(gameMode) ? 3 : numPlayers + 1;
 }
 
 // ── Helpers ──
@@ -189,13 +200,13 @@ function createInitialGameState(players, options = {}) {
   const config = {
     tokensPerColor: n <= 2 ? 4 : n === 3 ? 5 : 7,
     wildTokens: 5,
-    revealedTiles: n + 1,
+    revealedTiles: revealedTilesFor(n, gameMode),
     cardsPerRow: 4,
     maxTokensInHand: 10,
     maxReserved: 3,
     winThreshold: 15,
     take2MinStack: 4,
-    tilePoints: tilePointsFor(n),
+    tilePoints: tilePointsFor(n, gameMode),
   };
 
   const tier1 = shuffle(ALL_CARDS.filter(c => c.tier === 1));
@@ -802,6 +813,7 @@ module.exports = {
   ALL_CARDS,
   ALL_BONUS_TILES,
   tilePointsFor,
+  revealedTilesFor,
   createInitialGameState,
   clientView,
   clientViewForPlayer,

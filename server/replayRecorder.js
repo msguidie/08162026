@@ -76,7 +76,7 @@ function begin(room) {
         // What a noble paid in THIS game.  Recorded rather than re-derived so
         // a game stays scored the way it was played if the rule moves again;
         // files written before the rule existed have no `tp` and were all 3.
-        tp: state.config?.tilePoints ?? tilePointsFor(state.numPlayers),
+        tp: state.config?.tilePoints ?? tilePointsFor(state.numPlayers, state.gameMode),
       },
       actions: [],
     };

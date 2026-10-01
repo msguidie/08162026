@@ -158,12 +158,14 @@ Things a naive port gets wrong — each is covered by a named test:
     detects it; the validation run hit 4,051 such positions.
 16. **`_tileClaimed` is consumed by the broadcast**, not by the engine — it is
     attached to the action result and deleted from the state.
-17. **A noble is worth 3 / 2 / 1.5 points at 2 / 3 / 4 players**
-    (`config["tilePoints"]`, `gameLogic.tilePointsFor`).  Four-player scores —
-    2v2 included — are therefore half-integers; the thresholds (15, >30, 33)
-    and every comparison are unchanged, and halves are exact in binary floating
-    point, so nothing rounds.  The tile catalogue still carries 3: what a tile
-    pays comes from the game, not from the table.
+17. **Nobles depend on the mode.**  Individual games reveal n+1 tiles worth
+    3 / 2 / 1.5 points at 2 / 3 / 4 players; 1v2 and 2v2 reveal **three** tiles
+    worth **3** each (`config["revealedTiles"]`, `config["tilePoints"]`,
+    `gameLogic.revealedTilesFor` / `tilePointsFor`).  Four-player individual
+    scores are therefore half-integers; the thresholds (15, >30, 33) and every
+    comparison are unchanged, and halves are exact in binary floating point,
+    so nothing rounds.  The tile catalogue still carries 3: what a tile pays
+    comes from the game, not from the table.
 
 ### Hidden information (`view.py`)
 
