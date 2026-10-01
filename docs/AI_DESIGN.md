@@ -21,9 +21,11 @@ forced playouts + policy-target pruning, and **search at deployment**. Masked PP
    economy, noble table and selection-blocking 10-token cap.
 
 **Engine**: keep the validated pure-Python engine (`splendor_ai/rules`, 0 mismatches over 16k games, 73k steps/s).
-No Numba/C++ rewrite unless the throughput gate (§7) fails. A noble is worth 3 / 2 / 1.5 points at 2 / 3 / 4
-players (`config["tilePoints"]`), so four-player scores are half-integers; the observation carries the seat count
-already, so nothing in the 860-dim encoding changes, and the thresholds (15 / >30 / 33) are untouched.
+No Numba/C++ rewrite unless the throughput gate (§7) fails. Individual games reveal n+1 nobles worth
+3 / 2 / 1.5 points at 2 / 3 / 4 players; 1v2 and 2v2 reveal three nobles worth 3 (`config["revealedTiles"]`,
+`config["tilePoints"]`), so four-player individual scores are half-integers.  The observation carries the seat
+count and the mode already, so nothing in the 860-dim encoding changes, and the thresholds (15 / >30 / 33) are
+untouched.
 
 **One network for all modes** (2p, 3p, 4p individual, 1v2, 2v2), conditioned on mode/seat/role/threshold features.
 Per-mode fine-tuning is an optional last step shipped only if it wins the arena (≥55% over ≥2,000 paired games).

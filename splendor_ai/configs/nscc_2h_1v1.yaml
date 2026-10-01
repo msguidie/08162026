@@ -1,25 +1,30 @@
-# A two-hour 1v1 sprint on one NSCC `ai` node (4x A100-40GB + 64 cores).
+# The two-hour 1v1 sprint on one 4x A100 node, measured and tuned.
 #
-# Same layout as nscc_4xa100.yaml (GPU 0 learner, GPU 1-3 inference servers,
-# 56 CPU actors) with every knob moved from "118-hour run" to "one sitting":
+# Launch it with scripts/train_1v1_2h.sh on an interactive node: that script
+# sizes the actor pool from the cores the job really has and prints the log.
 #
-#   * 2p only, no curriculum -- the mixture is ind2 from the first game.
-#   * cheaper search (256/64 sims instead of 600/120): in two hours the number
-#     of games dominates the quality of each move, and the policy target still
-#     comes from 256 visits, which is well above the level where forced
-#     playouts eat the budget (that failure was at 48).
-#   * a smaller net (512x8, ~5.5M) that the learner can push through many more
-#     optimiser steps in the same wall clock.
-#   * a short replay window (3 -> 10) so stale games leave the buffer quickly;
-#     the replay buffer is NOT checkpointed (a 2h run has nothing to resume).
-#   * generations of 5,000 games so evaluation lands every few minutes.
+# Layout as in nscc_4xa100.yaml (GPU 0 learner, GPU 1-3 inference servers, the
+# rest of the cores on actors).  Knobs, and the measurement behind each
+# (scripts/speed_probe.py on x1000c2s5b0n0, 128 cores, 120 actors):
+#
+#   * games_per_actor 128.  An actor sends one batched request per lockstep
+#     round, and a GPU call costs ~1.9 ms whether it carries 8 rows or 256, so
+#     rows per request is the whole game: 24 games gave 120k sims/s, 64 gave
+#     179k, 128 gave 204k.
+#   * no historical opponents.  A historical checkpoint is evaluated on the
+#     actor's own CPU, and every round of all 128 games waits for it.  In two
+#     hours there is barely a pool to draw from anyway; 10% of games put the
+#     greedy anchor in one seat instead, which costs nothing and keeps a
+#     sanity signal in the data.
+#   * 2p only, no curriculum; 256/64 sims (PCR 25%); a 512x8 net (~4.7M); a
+#     3 -> 10 generation replay window, not checkpointed; 5,000-game
+#     generations, so an evaluation lands every ~15 minutes.
+#   * cosine_steps 24000: ~2,250 records/s x replay_ratio 6 / batch 3072 is
+#     ~4.4 learner steps/s, ~26k steps in 100 minutes.  The old 12k schedule
+#     would have spent the second hour at the floor learning rate.
 #
 # It trains ind2 ONLY.  For 1v2 / 2v2 use nscc_4xa100.yaml -- those modes need
 # the full curriculum, not a sprint.
-#
-#   python -m splendor_ai.selfplay.train \
-#       --config splendor_ai/configs/nscc_2h_1v1.yaml \
-#       --warm-start runs/bootstrap.pt        # optional, see README "Bootstrap"
 run_dir: runs/sprint2h
 seed: 20260908
 
@@ -52,8 +57,8 @@ search_fast:                 # 75% of moves, not recorded
   max_depth: 200
 
 selfplay:
-  actors: 56
-  games_per_actor: 24
+  actors: 120                # the launcher overrides this from the core count
+  games_per_actor: 128
   pcr_full_prob: 0.25
   temperature_plies: 12
   temperature: 1.0
@@ -61,11 +66,10 @@ selfplay:
   truncation_z_weight: 0.3
   win_threshold: null        # the real rules; NEVER override for a real run
   augment_rotations: 5
-  mixed_game_frac: 0.25
-  # More self-play against the current net than the 118-hour config: with only
-  # a couple of dozen generations there is barely a historical pool to draw
-  # from, and the anchors are there to stop an early collapse, not to teach.
-  opponent_weights: {latest: 0.40, historical: 0.40, anchor: 0.20}
+  mixed_game_frac: 0.10
+  # Pure self-play plus a greedy seat in 10% of games; no historical nets (see
+  # the header: they run on the actor's CPU and stall every game in its wave).
+  opponent_weights: {latest: 0.0, historical: 0.0, anchor: 1.0}
   historical_pool_size: 16
   historical_cache: 3
   historical_pool_refresh_s: 60.0
@@ -100,7 +104,7 @@ learner:
   lr: 3.0e-4
   lr_final: 5.0e-5
   warmup_steps: 500
-  cosine_steps: 12000        # the whole sprint, not a 118-hour schedule
+  cosine_steps: 24000        # ~4.4 steps/s x 100 min, see the header
   weight_decay: 1.0e-4
   grad_clip: 1.0
   replay_ratio: 6.0
@@ -135,6 +139,6 @@ eval:
   final_eval_seconds: 120.0
 
 games_per_generation: 5000
-max_seconds: 7200            # two hours, wall clock
+max_seconds: 6000            # 100 min of self-play inside a 2 h allocation
 torch_threads: 1
 learner_threads: 8

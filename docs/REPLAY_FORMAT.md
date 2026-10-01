@@ -24,7 +24,8 @@ updating all four.
     "board": [[4 card ids], [4 ids], [4 ids]],   // tier1, tier2, tier3 face-up, left→right
     "decks": [[ids...], [ids...], [ids...]],      // remaining deck arrays in SERVER ORDER: pop() takes the LAST element
     "tiles": [tile ids],                          // revealed nobles, in order
-    "tp": 1.5                                     // what one noble paid: 3/2/1.5 at 2/3/4 players.
+    "tp": 1.5                                     // what one noble paid: 3/2/1.5 at 2/3/4 players
+                                                  // in individual games, 3 in 1v2 and 2v2.
   },                                              // Absent in files recorded before the rule — those were all 3.
 
   "actions": [                          // one entry per COMPLETED turn action, in order

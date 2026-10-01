@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from splendor_ai.rules import engine as E
+from splendor_ai.rules.actions import BUY_BOARD_START, CHOOSE_TILE_START
 from splendor_ai.rules.cards import (CARDS, TILES, NUM_COLORS, rotate_id,
                                      rotate_tile_id)
 from splendor_ai import encode as EN
@@ -211,7 +212,13 @@ def test_state_bytes_round_trip_every_field():
                 if not actions or rng.random() < 0.01:
                     E.resign(s, s.current_player)
                     continue
-                E.apply(s, rng.choice(actions))
+                # Lean towards buying: tableaus then grow fast enough that a
+                # multi-noble choice still turns up, now that 1v2 and 2v2
+                # reveal only three tiles and uniform play rarely gets there.
+                buys = [a for a in actions
+                        if BUY_BOARD_START <= a < CHOOSE_TILE_START]
+                E.apply(s, rng.choice(buys) if buys and rng.random() < 0.7
+                        else rng.choice(actions))
     assert seen_pending and seen_result and seen_resigned and seen_blind
     assert max(sizes) < 400                              # compact records
 

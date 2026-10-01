@@ -202,14 +202,16 @@ def test_single_qualifying_noble_is_auto_claimed_after_any_action():
     (2, "INDIVIDUAL", None, 3),
     (3, "INDIVIDUAL", None, 2),
     (4, "INDIVIDUAL", None, 1.5),
-    (3, "ONE_V_TWO", None, 2),
-    (4, "TEAM", "ADJACENT", 1.5),
+    (3, "ONE_V_TWO", None, 3),
+    (4, "TEAM", "ADJACENT", 3),
+    (4, "TEAM", "OPPOSITE", 3),
 ])
-def test_a_noble_is_worth_3_2_or_1_5_by_player_count(n, mode, layout, expected):
-    """`gameLogic.tilePointsFor`, checked against the Node engine itself.
+def test_a_noble_is_worth_what_its_game_pays(n, mode, layout, expected):
+    """`gameLogic.tilePointsFor`, checked against the Node engine itself:
+    3 / 2 / 1.5 in individual games at 2 / 3 / 4 players, 3 in 1v2 and 2v2.
 
-    Four-player scores are half-integers; everything downstream (thresholds,
-    tie-breaks, the byte serialisation) works on halves unchanged.
+    Four-player individual scores are half-integers; everything downstream
+    (thresholds, tie-breaks, the byte serialisation) works on halves unchanged.
     """
     cards = discount_cards([4, 4, 0, 0, 0])          # qualifies tile 0 only
     players = [{"cards": cards, "gems": [0] * 6}] + [{} for _ in range(n - 1)]
@@ -219,6 +221,23 @@ def test_a_noble_is_worth_3_2_or_1_5_by_player_count(n, mode, layout, expected):
     assert p.state.config["tilePoints"] == expected
     assert p.state.players[0].tiles == [0]
     assert p.state.players[0].score == expected
+
+
+@pytest.mark.parametrize("n,mode,layout,expected", [
+    (2, "INDIVIDUAL", None, 3),
+    (3, "INDIVIDUAL", None, 4),
+    (4, "INDIVIDUAL", None, 5),
+    (3, "ONE_V_TWO", None, 3),
+    (4, "TEAM", "ADJACENT", 3),
+    (4, "TEAM", "OPPOSITE", 3),
+])
+def test_revealed_tiles_n_plus_one_or_three_in_the_team_modes(n, mode, layout, expected):
+    import random
+    s = E.new_game(n, mode, layout, rng=random.Random(5))
+    assert s.config["revealedTiles"] == expected
+    assert len(s.tiles) == expected
+    back = E.GameState.from_bytes(s.to_bytes())
+    assert back.config == s.config
 
 
 def test_half_point_scores_survive_the_byte_round_trip():

@@ -24,7 +24,8 @@ export interface Card {
 
 export interface BonusTile {
   id: number;
-  /** 3 at two players, 2 at three, 1.5 at four — stamped by the server. */
+  /** Stamped by the server: 3 / 2 / 1.5 at 2 / 3 / 4 players in individual
+   *  games, 3 in 1v2 and 2v2. */
   points: number;
   requirement: Cost;
 }
